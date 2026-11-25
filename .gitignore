@@ -1,0 +1,5 @@
+bin/
+tmp/
+tokenizer/target/
+*.log
+deploy/compose/data/

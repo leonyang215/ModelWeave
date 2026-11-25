@@ -1,0 +1,37 @@
+[package]
+name = "modelweave-tokenizer"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "ModelWeave tokenizer service: OpenAI / Anthropic requests in, token lists with inference and parsing options out, for every registered model (DeepSeek V4 / V4.1, Qwen3, Qwen3-VL, Hugging Face chat templates); images and videos expanded to pad-value positions from their metadata."
+publish = false
+
+[[bin]]
+name = "modelweave-tokenizer"
+path = "src/main.rs"
+
+[dependencies]
+aho-corasick = "1"
+axum = { version = "0.8", default-features = false, features = ["http1", "http2", "json", "tokio", "query"] }
+base64 = "0.22"
+clap = { version = "4", features = ["derive", "env"] }
+deepseek-recipe = "0.2"
+deepseek-recipe-core = "0.2"
+deepseek-recipe-encoding = "0.2"
+data-url = "0.3"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
+minijinja = { version = "3.1", default-features = false, features = ["builtins", "macros", "multi_template", "adjacent_loop_items", "std_collections", "loop_controls", "serde", "preserve_order"] }
+minijinja-contrib = { version = "3.1", features = ["pycompat"] }
+prometheus = { version = "0.14", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
+tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net", "sync", "time", "io-util"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 4

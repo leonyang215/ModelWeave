@@ -1,0 +1,361 @@
+// Package gateway is the HTTP front of ModelWeave: OpenAI / Anthropic APIs,
+// the MWIP control plane for workers, admin endpoints and metrics.
+package gateway
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"net/http"
+	"strconv"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	"github.com/leonyang215/ModelWeave/internal/config"
+	"github.com/leonyang215/ModelWeave/internal/engine"
+	"github.com/leonyang215/ModelWeave/internal/enginestate"
+	"github.com/leonyang215/ModelWeave/internal/kvindex"
+	"github.com/leonyang215/ModelWeave/internal/obs"
+	"github.com/leonyang215/ModelWeave/internal/orchestrator"
+	"github.com/leonyang215/ModelWeave/internal/qos"
+	"github.com/leonyang215/ModelWeave/internal/registry"
+	"github.com/leonyang215/ModelWeave/internal/scheduler"
+	"github.com/leonyang215/ModelWeave/internal/tokenizer"
+)
+
+type modelRT struct {
+	cfg      *config.Model
+	rt       *orchestrator.Model
+	queue    *qos.Queue
+	overload *qos.Overload
+}
+
+// Server is the gateway.
+type Server struct {
+	cfg     *config.Config
+	log     *slog.Logger
+	met     *obs.Metrics
+	reg     *registry.Registry
+	tok     *tokenizer.Client
+	eng     *engine.Client
+	orch    *orchestrator.Orchestrator
+	limiter *qos.Limiter
+	keys    map[string]string // api key -> tenant
+	tenants map[string]config.Tenant
+	index   kvindex.Index
+	events  kvindex.EventSink
+	models  map[string]*modelRT // canonical name
+	byName  map[string]*modelRT // name or alias
+	ready   atomic.Bool
+	version string
+	wg      sync.WaitGroup
+}
+
+// Default absolute load-imbalance thresholds per role, in the role's load
+// unit (queued prefill tokens, or running requests).
+var defaultBalanceAbs = map[registry.Role]float64{
+	registry.RolePrefill: 32768,
+	registry.RoleDecode:  32,
+	registry.RoleUnified: 32,
+	registry.RoleEncode:  8,
+}
+
+// New builds a gateway from configuration.
+func New(cfg *config.Config, log *slog.Logger, version string) (*Server, error) {
+	met := obs.NewMetrics()
+	met.BuildInfo.WithLabelValues(version).Set(1)
+	s := &Server{
+		cfg:     cfg,
+		log:     log,
+		met:     met,
+		reg:     registry.New(cfg.Discovery.HeartbeatTTL.D()),
+		tok:     tokenizer.New(cfg.Tokenizer.Endpoints, cfg.Tokenizer.Timeout.D()),
+		eng:     engine.New(),
+		keys:    map[string]string{},
+		tenants: map[string]config.Tenant{},
+		models:  map[string]*modelRT{},
+		byName:  map[string]*modelRT{},
+		version: version,
+	}
+	s.orch = orchestrator.New(s.reg, s.eng, met, log, cfg.Health, cfg.Server)
+	s.tok.OnUnreachable = func(endpoint string, err error) {
+		met.TokenizerDown.WithLabelValues(endpoint).Inc()
+		log.Warn("tokenizer replica unreachable, trying the next one", "endpoint", endpoint, "error", err)
+	}
+
+	var policies []qos.TenantPolicy
+	for _, t := range cfg.Tenants {
+		p, _ := qos.ParsePriority(t.Priority)
+		policies = append(policies, qos.TenantPolicy{Name: t.Name, Priority: p, Weight: t.Weight, RPM: t.RPM, TPM: t.TPM, MaxConcurrency: t.MaxConcurrency})
+		s.tenants[t.Name] = t
+		for _, k := range t.APIKeys {
+			s.keys[k] = t.Name
+		}
+	}
+	s.limiter = qos.NewLimiter(policies)
+
+	ki := cfg.KVIndex
+	capacity := ki.CapacityBlocks
+	switch ki.Type {
+	case "approx":
+		s.index = kvindex.NewApprox(ki.TTL.D(), capacity)
+	case "events":
+		ev := kvindex.NewEvents(ki.OptimisticTTL.D())
+		s.index, s.events = ev, ev
+	case "remote":
+		s.index = &kvindex.Remote{
+			URL: ki.RemoteURL, Timeout: ki.RemoteTimeout.D(), Client: s.eng.HTTP(),
+			Fallback: kvindex.NewApprox(ki.TTL.D(), capacity),
+			OnResult: func(outcome string, d time.Duration) {
+				met.CacheLookup.WithLabelValues("remote_"+outcome, outcome).Observe(d.Seconds())
+			},
+		}
+	default:
+		s.index = kvindex.None{}
+	}
+
+	for i := range cfg.Models {
+		mc := &cfg.Models[i]
+		build := func(role registry.Role, pc scheduler.PolicyConfig) (*scheduler.Scheduler, error) {
+			pol, err := scheduler.BuildPolicy(pc, defaultBalanceAbs[role])
+			if err != nil {
+				return nil, err
+			}
+			return scheduler.New(s.reg, scheduler.Config{
+				Policy: pol, Index: s.index, StaleAfter: cfg.EngineState.StaleAfter.D(),
+				Observer: &schedObserver{met: met, model: mc.Name},
+			}), nil
+		}
+		rt := &orchestrator.Model{
+			Cfg:       mc,
+			Name:      mc.Name,
+			Protocol:  mc.EngineProtocol,
+			BlockSize: ki.BlockSize,
+			Seed:      kvindex.ModelSeed(mc.Name),
+			Artifacts: orchestrator.NewArtifactCache(mc.Encode.ArtifactCacheTTL.D(), mc.Encode.ArtifactCacheMax),
+			Sessions:  orchestrator.NewSessionMap(mc.Normal.SessionTTL.D()),
+		}
+		gwEncode := engine.EncodeInGateway(mc.EngineProtocol)
+		log.Info("model configured", "model", mc.Name, "mode", mc.Mode, "engine_protocol", mc.EngineProtocol,
+			"pd_handshake", mc.PD.Handshake, "encode_in_gateway", gwEncode)
+		if !gwEncode {
+			log.Info("encode stage is engine-managed: media are sent to the prefill engine, which dispatches them to its own encoders",
+				"model", mc.Name, "engine_protocol", mc.EngineProtocol)
+		}
+		met.ModelInfo.WithLabelValues(mc.Name, mc.EngineProtocol, mc.Mode, mc.PD.Handshake, strconv.FormatBool(gwEncode)).Set(1)
+		var err error
+		if rt.Prefill, err = build(registry.RolePrefill, mc.Routing.Prefill); err != nil {
+			return nil, err
+		}
+		if rt.Decode, err = build(registry.RoleDecode, mc.Routing.Decode); err != nil {
+			return nil, err
+		}
+		if rt.Encode, err = build(registry.RoleEncode, defaultPolicy(mc.Routing.Encode, "least_load")); err != nil {
+			return nil, err
+		}
+		if rt.Unified, err = build(registry.RoleUnified, mc.Routing.Unified); err != nil {
+			return nil, err
+		}
+		m := &modelRT{
+			cfg: mc,
+			rt:  rt,
+			queue: qos.NewQueue(qos.QueueConfig{
+				MaxSize: mc.Admission.QueueSize, MaxWait: mc.Admission.MaxWait.D(), BackfillDepth: mc.Admission.BackfillDepth,
+			}, &queueObserver{met: met, model: mc.Name}),
+			overload: qos.NewOverload(mc.Admission.Overload.Thresholds, mc.Admission.Overload.Hysteresis, mc.Admission.Overload.CacheExemptRatio),
+		}
+		s.models[mc.Name] = m
+		s.byName[mc.Name] = m
+		for _, a := range mc.Aliases {
+			s.byName[a] = m
+		}
+	}
+
+	s.reg.OnChange(func(ev registry.Event) {
+		spec := ev.Worker.Spec()
+		switch ev.Kind {
+		case "removed":
+			s.index.ForgetWorker(spec.ID)
+			if m := s.models[spec.Model]; m != nil {
+				m.rt.Sessions.ForgetWorker(spec.ID)
+			}
+			s.log.Info("worker removed", "worker", spec.ID, "model", spec.Model, "role", spec.Role)
+		case "added", "updated":
+			if spec.KVCapacityTokens > 0 && ki.BlockSize > 0 && capacity == 0 {
+				s.index.SetWorkerCapacity(spec.ID, int(spec.KVCapacityTokens)/ki.BlockSize)
+			}
+			s.log.Info("worker "+ev.Kind, "worker", spec.ID, "model", spec.Model, "role", spec.Role, "url", spec.URL, "source", ev.Worker.Source)
+		}
+		if m := s.models[spec.Model]; m != nil {
+			m.queue.Notify()
+		}
+	})
+	for _, w := range cfg.Discovery.Workers {
+		w.Model = s.byName[w.Model].cfg.Name
+		if _, _, err := s.reg.Upsert(w, "static"); err != nil {
+			return nil, err
+		}
+	}
+	met.Registry.MustRegister(&workerCollector{reg: s.reg, staleAfter: cfg.EngineState.StaleAfter.D()})
+	s.ready.Store(true)
+	return s, nil
+}
+
+func defaultPolicy(pc scheduler.PolicyConfig, name string) scheduler.PolicyConfig {
+	if pc.Name == "" {
+		pc.Name = name
+	}
+	return pc
+}
+
+// Handler returns the HTTP handler.
+func (s *Server) Handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/chat/completions", s.handleAPI("chat_completions"))
+	mux.HandleFunc("POST /v1/responses", s.handleAPI("responses"))
+	mux.HandleFunc("POST /v1/messages", s.handleAPI("messages"))
+	mux.HandleFunc("GET /v1/models", s.handleModels)
+	mux.HandleFunc("POST /mwip/v1/heartbeat", s.control(s.handleHeartbeat))
+	mux.HandleFunc("POST /mwip/v1/kv_events", s.control(s.handleKVEvents))
+	mux.HandleFunc("POST /mwip/v1/deregister", s.control(s.handleDeregister))
+	mux.HandleFunc("GET /admin/workers", s.control(s.handleWorkers))
+	mux.HandleFunc("POST /admin/workers/{id}/drain", s.control(s.handleDrain))
+	mux.HandleFunc("GET /admin/stats", s.control(s.handleStats))
+	mux.Handle("GET /metrics", promhttp.HandlerFor(s.met.Registry, promhttp.HandlerOpts{}))
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok")) })
+	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
+		if !s.ready.Load() {
+			http.Error(w, "draining", http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte("ready"))
+	})
+	return mux
+}
+
+// Run serves until ctx is canceled, then drains.
+func (s *Server) Run(ctx context.Context) error {
+	bg, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.startBackground(bg)
+	srv := &http.Server{
+		Addr:              s.cfg.Server.Listen,
+		Handler:           s.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+	errc := make(chan error, 1)
+	go func() { errc <- srv.ListenAndServe() }()
+	s.log.Info("modelweave gateway listening", "addr", s.cfg.Server.Listen, "version", s.version,
+		"models", len(s.models), "static_workers", len(s.cfg.Discovery.Workers), "kv_index", s.index.Kind())
+	select {
+	case err := <-errc:
+		return err
+	case <-ctx.Done():
+	}
+	s.ready.Store(false)
+	s.log.Info("shutting down, draining requests", "grace", s.cfg.Server.ShutdownGrace.D().String())
+	sctx, scancel := context.WithTimeout(context.Background(), s.cfg.Server.ShutdownGrace.D())
+	defer scancel()
+	err := srv.Shutdown(sctx)
+	cancel()
+	for _, m := range s.models {
+		m.queue.Close()
+	}
+	s.wg.Wait()
+	if errors.Is(err, http.ErrServerClosed) {
+		return nil
+	}
+	return err
+}
+
+func (s *Server) startBackground(ctx context.Context) {
+	every := func(d time.Duration, fn func()) {
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			t := time.NewTicker(d)
+			defer t.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+					fn()
+				}
+			}
+		}()
+	}
+	every(time.Second, func() {
+		for _, id := range s.reg.Sweep() {
+			s.log.Warn("worker heartbeat expired", "worker", id)
+		}
+	})
+	every(30*time.Second, func() {
+		switch ix := s.index.(type) {
+		case *kvindex.Approx:
+			ix.Blocks().Sweep()
+		case *kvindex.Events:
+			ix.Sweep()
+		}
+	})
+	every(time.Second, s.updateOverload)
+	if p := s.cfg.EngineState.Poll; p.Enabled {
+		poller := enginestate.NewPoller(s.reg, s.eng.HTTP(), enginestate.Options{
+			Format: p.Format, Preset: p.Preset, Metrics: p.Metrics, Timeout: p.Timeout.D(),
+			OnResult: func(format, outcome string) { s.met.StatePolls.WithLabelValues(format, outcome).Inc() },
+		})
+		every(p.Interval.D(), func() { poller.PollAll(ctx) })
+	}
+}
+
+// updateOverload computes pool utilization per model and feeds the
+// overload controllers.
+func (s *Server) updateOverload() {
+	now := time.Now()
+	stale := s.cfg.EngineState.StaleAfter.D()
+	for name, m := range s.models {
+		util := 0.0
+		for _, role := range []registry.Role{registry.RoleDecode, registry.RoleUnified, registry.RolePrefill} {
+			ws := s.reg.Candidates(name, role)
+			if len(ws) == 0 {
+				continue
+			}
+			var used, capTot, load float64
+			n := 0
+			for _, w := range ws {
+				snap := w.Snapshot(now, stale)
+				if !snap.Healthy {
+					continue
+				}
+				n++
+				switch {
+				case role != registry.RolePrefill && snap.KVCapacity > 0:
+					used += float64(snap.EffectiveKVUsed)
+					capTot += float64(snap.KVCapacity)
+				case role == registry.RolePrefill && snap.MaxPrefillTokens > 0:
+					used += float64(snap.QueuedPrefillTokens())
+					capTot += float64(snap.MaxPrefillTokens)
+				case snap.MaxRunning > 0:
+					load += float64(snap.Running()) / float64(snap.MaxRunning)
+				}
+			}
+			u := 0.0
+			if capTot > 0 {
+				u = used / capTot
+			} else if n > 0 {
+				u = load / float64(n)
+			}
+			s.met.Utilization.WithLabelValues(name, string(role)).Set(u)
+			util = max(util, u)
+		}
+		if qmax := m.cfg.Admission.QueueSize; qmax > 0 {
+			util = max(util, float64(m.queue.Len())/float64(qmax))
+		}
+		level := m.overload.Update(util)
+		s.met.OverloadLevel.WithLabelValues(name).Set(float64(level))
+	}
+}

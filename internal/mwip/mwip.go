@@ -1,0 +1,574 @@
+// Package mwip defines the ModelWeave wire contracts (docs/protocol.md):
+//
+//   - the intermediate state the tokenizer returns: the conversation
+//     rendered into one token list by the model's prompt format (DeepSeek,
+//     Qwen, any chat template), images and videos expanded to pad-value
+//     positions, with the options engines need to generate and parse;
+//   - the native engine protocol (POST /mwip/v1/generate, /mwip/v1/encode):
+//     the intermediate state plus execution fields, answered with parsed
+//     output events;
+//   - the control plane (heartbeats, KV events).
+//
+// vLLM and SGLang requests are adapted from the intermediate state in
+// package engine; their wire types live in package wire.
+package mwip
+
+import "encoding/json"
+
+// Version of the protocol, sent as the MWIP-Version header.
+const Version = "2"
+
+// API protocols understood by the tokenizer.
+const (
+	ProtocolChatCompletions = "chat_completions" // OpenAI /v1/chat/completions
+	ProtocolResponses       = "responses"        // OpenAI /v1/responses
+	ProtocolMessages        = "messages"         // Anthropic /v1/messages
+)
+
+// Engine protocols the gateway speaks to workers.
+const (
+	EngineMWIP   = "mwip"   // the intermediate state, POST /mwip/v1/generate
+	EngineVLLM   = "vllm"   // POST /inference/v1/generate (token in, derender out)
+	EngineSGLang = "sglang" // POST /generate
+)
+
+// ---------------------------------------------------------------------------
+// Tokenizer contract: the intermediate state
+// ---------------------------------------------------------------------------
+
+// RenderRequest asks the tokenizer to convert an API request.
+type RenderRequest struct {
+	RequestID     string          `json:"request_id"`
+	Protocol      string          `json:"protocol"`
+	Model         string          `json:"model,omitempty"` // tokenizer-side model name; defaults to body.model
+	Body          json.RawMessage `json:"body"`
+	ContextLength int             `json:"context_length,omitempty"`
+}
+
+// RenderResult is the intermediate state.
+type RenderResult struct {
+	RequestID        string           `json:"request_id"`
+	Protocol         string           `json:"protocol"` // client API protocol
+	Model            string           `json:"model"`
+	ModelVersion     string           `json:"model_version"`
+	PromptTokens     int              `json:"prompt_tokens"` // == len(TokenIDs)
+	TokenIDs         []uint32         `json:"token_ids"`
+	Multimodal       *Multimodal      `json:"multimodal,omitempty"`
+	Conversation     Conversation     `json:"conversation"`
+	InferenceOptions InferenceOptions `json:"inference_options"`
+	ParsingOptions   ParsingOptions   `json:"parsing_options"`
+	Stream           bool             `json:"stream"` // the client asked for a stream
+	ResponseOptions  ResponseOptions  `json:"response_options"`
+	RenderArtifact   RenderArtifact   `json:"render_artifact"`
+	TimingUS         map[string]int   `json:"timing_us,omitempty"`
+}
+
+// Conversation is the conversation without its messages: what engine-side
+// parsers need.
+type Conversation struct {
+	ThinkingMode    bool              `json:"thinking_mode"`
+	ReasoningEffort string            `json:"reasoning_effort,omitempty"`
+	Tools           []json.RawMessage `json:"tools,omitempty"` // OpenAI function tools
+	ToolChoice      string            `json:"tool_choice"`     // auto | none | required
+	ResponseFormat  string            `json:"response_format"` // text | json_object | json_schema | regex
+	// ChatTemplateKwargs are the template variables the prompt was rendered
+	// with (thinking switches), for engines whose parsers read them.
+	ChatTemplateKwargs map[string]any `json:"chat_template_kwargs,omitempty"`
+}
+
+// OutputConstraint is a constraint engines may enforce by constrained
+// decoding, as kind and schema string.
+type OutputConstraint struct {
+	Kind   string `json:"kind"` // json | regex | tool_call | tool_call_required
+	Schema string `json:"schema"`
+}
+
+// InferenceOptions are the sampling options, max_tokens resolved.
+type InferenceOptions struct {
+	MaxTokens         int               `json:"max_tokens"`
+	Temperature       *float64          `json:"temperature,omitempty"`
+	TopP              *float64          `json:"top_p,omitempty"`
+	TopK              *int              `json:"top_k,omitempty"`
+	MinP              *float64          `json:"min_p,omitempty"`
+	PresencePenalty   *float64          `json:"presence_penalty,omitempty"`
+	FrequencyPenalty  *float64          `json:"frequency_penalty,omitempty"`
+	RepetitionPenalty *float64          `json:"repetition_penalty,omitempty"`
+	Seed              *uint64           `json:"seed,omitempty"`
+	Logprobs          bool              `json:"logprobs"`
+	TopLogprobs       *int              `json:"top_logprobs,omitempty"`
+	StopTokenIDs      []uint32          `json:"stop_token_ids"`
+	OutputConstraint  *OutputConstraint `json:"output_constraint,omitempty"`
+}
+
+// Output parsers named in ParsingOptions.
+const (
+	ParserDeepseekV4 = "deepseek_v4" // </think> reasoning, DSML tool calls
+	ParserQwen3      = "qwen3"       // <think>...</think> reasoning
+	ParserHermes     = "hermes"      // <tool_call>{"name": ..., "arguments": ...}</tool_call>
+)
+
+// ParsingOptions tell engines how to parse their output.
+type ParsingOptions struct {
+	ReasoningParser      string   `json:"reasoning_parser,omitempty"` // deepseek_v4 | qwen3; empty: no reasoning
+	ToolCallParser       string   `json:"tool_call_parser,omitempty"` // deepseek_v4 | hermes
+	ParseToolCalls       bool     `json:"parse_tool_calls"`
+	StartsInToolCalls    bool     `json:"starts_in_tool_calls"`
+	ParseJSONOutput      bool     `json:"parse_json_output"`
+	ThinkingInitialStage string   `json:"thinking_initial_stage,omitempty"` // reasoning_start | reasoning_continuation | content_continuation
+	StopSequences        []string `json:"stop_sequences,omitempty"`
+}
+
+// StartsInReasoning reports whether output begins inside the reasoning.
+func (p ParsingOptions) StartsInReasoning() bool {
+	return p.ThinkingInitialStage == "reasoning_start" || p.ThinkingInitialStage == "reasoning_continuation"
+}
+
+// ResponseOptions are response settings of the client protocol.
+type ResponseOptions struct {
+	IncludeUsage bool `json:"include_usage"`
+}
+
+// Span is a token range.
+type Span struct {
+	Offset int `json:"offset"`
+	Length int `json:"length"`
+}
+
+// TokenLayout marks structural ranges of the prompt.
+type TokenLayout struct {
+	CacheablePrefix  Span `json:"cacheable_prefix"`
+	GenerationPrimer Span `json:"generation_primer"`
+}
+
+// Segment is the token range of one rendered message.
+type Segment struct {
+	Role   string `json:"role"`
+	Offset int    `json:"offset"`
+	Length int    `json:"length"`
+}
+
+// RenderArtifact is the by-product of rendering.
+type RenderArtifact struct {
+	Version            int         `json:"version"`
+	Encoding           string      `json:"encoding"`
+	TokenLayout        TokenLayout `json:"token_layout"`
+	Segments           []Segment   `json:"segments,omitempty"`
+	PrefixContinuation bool        `json:"prefix_continuation,omitempty"`
+}
+
+// Multimodal lists the images and videos of a prompt.
+type Multimodal struct {
+	PadShift uint32 `json:"pad_shift"` // every pad value is at least this
+	// PlaceholderTokenID is the model token one unexpanded image takes in
+	// the prompt format.
+	PlaceholderTokenID uint32      `json:"placeholder_token_id,omitempty"`
+	Items              []MediaItem `json:"items"`
+}
+
+// HasVideo reports whether any item is a video.
+func (m *Multimodal) HasVideo() bool {
+	if m == nil {
+		return false
+	}
+	for _, it := range m.Items {
+		if it.Modality == "video" {
+			return true
+		}
+	}
+	return false
+}
+
+// Clone returns a deep copy (the gateway attaches embeddings per request).
+func (m *Multimodal) Clone() *Multimodal {
+	if m == nil {
+		return nil
+	}
+	c := *m
+	c.Items = make([]MediaItem, len(m.Items))
+	for i, it := range m.Items {
+		c.Items[i] = it
+		c.Items[i].Placements = append([]Placement(nil), it.Placements...)
+		c.Items[i].Placeholder = append([]uint32(nil), it.Placeholder...)
+		c.Items[i].Embeddings = append([]EmbeddingArtifact(nil), it.Embeddings...)
+	}
+	return &c
+}
+
+// MediaItem is one image or video.
+type MediaItem struct {
+	Index        int                  `json:"index"`
+	Modality     string               `json:"modality"` // image | video
+	Digest       string               `json:"digest"`   // sha256 hex of the media bytes
+	Source       MediaSource          `json:"source"`
+	Detail       string               `json:"detail,omitempty"`
+	Metadata     MediaMetadata        `json:"metadata"`
+	PixelControl *PixelControlOptions `json:"pixel_control_options,omitempty"`
+	FrameExtract *FrameExtractOptions `json:"frame_extract_options,omitempty"`
+	Plan         MediaPlan            `json:"plan"`
+	Span         Span                 `json:"span"` // whole range (a video's includes timestamp text)
+	Placements   []Placement          `json:"placements"`
+	// Placeholder replaces Span for engines that expand media themselves
+	// (vLLM, SGLang); empty when the model has none for the modality, so
+	// only the mwip protocol can carry the item.
+	Placeholder []uint32 `json:"placeholder,omitempty"`
+	// Embeddings are set by the gateway after the encode stage: one per
+	// placement, in placement order.
+	Embeddings []EmbeddingArtifact `json:"embedding_artifacts,omitempty"`
+}
+
+// MediaSource locates a media item.
+type MediaSource struct {
+	Kind string `json:"kind"` // url | base64
+	URL  string `json:"url"`
+	MIME string `json:"mime,omitempty"`
+}
+
+// MediaMetadata holds the objective properties the caller measured.
+type MediaMetadata struct {
+	Width       int     `json:"width,omitempty"`
+	Height      int     `json:"height,omitempty"`
+	DurationMS  int64   `json:"duration_ms,omitempty"`
+	TotalFrames *int64  `json:"total_frames,omitempty"`
+	VideoFPS    float64 `json:"video_fps,omitempty"`
+}
+
+// PixelControlOptions caps one image or one video frame.
+type PixelControlOptions struct {
+	MaxLongSide    *int   `json:"max_long_side,omitempty"`
+	MaxTotalPixels *int64 `json:"max_total_pixels,omitempty"`
+}
+
+// FrameExtractOptions control the frame sampling of a video.
+type FrameExtractOptions struct {
+	FPS          *float64             `json:"fps,omitempty"`
+	NFrames      *int                 `json:"nframes,omitempty"`
+	PixelControl *PixelControlOptions `json:"pixel_control_options,omitempty"`
+}
+
+// MediaPlan is the resize and token plan of an item.
+type MediaPlan struct {
+	Width      int       `json:"width"`
+	Height     int       `json:"height"`
+	Tokens     int       `json:"tokens"` // per image, or per kept frame
+	NFrames    int       `json:"nframes,omitempty"`
+	KeptFrames int       `json:"kept_frames,omitempty"`
+	Timestamps []float64 `json:"timestamps,omitempty"`
+}
+
+// Placement is the token range of one image or one kept video frame.
+type Placement struct {
+	Offset    int      `json:"offset"`
+	Length    int      `json:"length"`
+	PadValue  uint32   `json:"pad_value"`
+	Reference string   `json:"reference"` // image digest, or "{video digest}_kf_{k:04}"
+	Modality  string   `json:"modality"`  // image | frame
+	Timestamp *float64 `json:"timestamp,omitempty"`
+}
+
+// ---------------------------------------------------------------------------
+// Output types shared by every engine protocol
+// ---------------------------------------------------------------------------
+
+// Usage is the token accounting of a request (OpenAI / vLLM UsageInfo).
+type Usage struct {
+	PromptTokens            int                      `json:"prompt_tokens"`
+	CompletionTokens        int                      `json:"completion_tokens"`
+	TotalTokens             int                      `json:"total_tokens,omitempty"`
+	PromptTokensDetails     *PromptTokensDetails     `json:"prompt_tokens_details,omitempty"`
+	CompletionTokensDetails *CompletionTokensDetails `json:"completion_tokens_details,omitempty"`
+}
+
+// PromptTokensDetails details prompt usage.
+type PromptTokensDetails struct {
+	CachedTokens int `json:"cached_tokens"`
+}
+
+// CompletionTokensDetails details completion usage.
+type CompletionTokensDetails struct {
+	ReasoningTokens int `json:"reasoning_tokens"`
+}
+
+// Cached returns the cached prompt tokens.
+func (u *Usage) Cached() int {
+	if u == nil || u.PromptTokensDetails == nil {
+		return 0
+	}
+	return u.PromptTokensDetails.CachedTokens
+}
+
+// Reasoning returns the reasoning tokens.
+func (u *Usage) Reasoning() int {
+	if u == nil || u.CompletionTokensDetails == nil {
+		return 0
+	}
+	return u.CompletionTokensDetails.ReasoningTokens
+}
+
+// DeltaFunction is a tool call fragment.
+type DeltaFunction struct {
+	Name      string `json:"name,omitempty"`
+	Arguments string `json:"arguments,omitempty"`
+}
+
+// DeltaToolCall is one tool call fragment (OpenAI streaming semantics: the
+// first fragment of a call has id, type and name).
+type DeltaToolCall struct {
+	Index    int            `json:"index"`
+	ID       string         `json:"id,omitempty"`
+	Type     string         `json:"type,omitempty"`
+	Function *DeltaFunction `json:"function,omitempty"`
+}
+
+// TopLogprob is one candidate of a position.
+type TopLogprob struct {
+	Token   string  `json:"token"`
+	Logprob float64 `json:"logprob"`
+	Bytes   []int   `json:"bytes,omitempty"`
+}
+
+// LogprobContent is the logprob of one output token (OpenAI shape).
+type LogprobContent struct {
+	Token       string       `json:"token"`
+	Logprob     float64      `json:"logprob"`
+	Bytes       []int        `json:"bytes,omitempty"`
+	TopLogprobs []TopLogprob `json:"top_logprobs"`
+}
+
+// ChatLogprobs is ChatCompletionLogProbs.
+type ChatLogprobs struct {
+	Content []LogprobContent `json:"content"`
+}
+
+// Timing reports engine-side latencies in milliseconds.
+type Timing struct {
+	QueueMS    float64 `json:"queue_ms,omitempty"`
+	EncodeMS   float64 `json:"encode_ms,omitempty"`
+	PrefillMS  float64 `json:"prefill_ms,omitempty"`
+	TransferMS float64 `json:"transfer_ms,omitempty"`
+	TTFTMS     float64 `json:"ttft_ms,omitempty"`
+	DecodeMS   float64 `json:"decode_ms,omitempty"`
+}
+
+// ---------------------------------------------------------------------------
+// Execution
+// ---------------------------------------------------------------------------
+
+// Execution modes of one engine request.
+const (
+	ModeNormal = "normal" // one worker runs prefill and decode (no PD split)
+	ModeSplit  = "split"  // prefill on P, decode on D, KV moves P -> D
+)
+
+// PD handshakes for split mode.
+const (
+	// HandshakePush: D registers and acknowledges with its KV receiver; P
+	// is sent afterwards and pushes KV to D (Mooncake-style order).
+	HandshakePush = "push"
+	// HandshakeBootstrap: P and D get the request concurrently with a
+	// shared room; D fetches KV from P's bootstrap server (SGLang,
+	// vLLM MooncakeConnector).
+	HandshakeBootstrap = "bootstrap"
+	// HandshakePull: P runs first and returns a KV handle (vLLM:
+	// kv_transfer_params) that D uses to pull the KV (NixlConnector).
+	HandshakePull = "pull"
+)
+
+// Peer identifies one side of a KV transfer.
+type Peer struct {
+	WorkerID      string `json:"worker_id"`
+	URL           string `json:"url"`
+	BootstrapAddr string `json:"bootstrap_addr,omitempty"`
+	EngineID      string `json:"engine_id,omitempty"`
+}
+
+// KVReceiver is advertised by a registered decode worker (push).
+type KVReceiver struct {
+	WorkerID string `json:"worker_id"`
+	URL      string `json:"url"`
+	Room     string `json:"room"`
+	// CachedTokens is how much of the prompt D already holds; P only has to
+	// transfer KV after this point.
+	CachedTokens int `json:"cached_tokens,omitempty"`
+}
+
+// KVHandle locates KV that P keeps for D (pull).
+type KVHandle struct {
+	WorkerID string `json:"worker_id"`
+	URL      string `json:"url"`
+	Room     string `json:"room"`
+	Tokens   int    `json:"tokens"`
+}
+
+// Disagg describes the request's role in its execution.
+type Disagg struct {
+	Mode          string      `json:"mode"`           // normal | split
+	Role          string      `json:"role,omitempty"` // prefill | decode (split)
+	Handshake     string      `json:"handshake,omitempty"`
+	Room          string      `json:"room,omitempty"`           // pairing token (== attempt id)
+	BootstrapRoom int64       `json:"bootstrap_room,omitempty"` // numeric room (SGLang)
+	Prefill       *Peer       `json:"prefill,omitempty"`
+	Decode        *Peer       `json:"decode,omitempty"`
+	Receiver      *KVReceiver `json:"kv_receiver,omitempty"` // push: given to P
+	Handle        *KVHandle   `json:"kv_handle,omitempty"`   // pull: given to D
+	// KVTransferParams are a vLLM prefill's kv_transfer_params handed to D.
+	KVTransferParams map[string]any `json:"kv_transfer_params,omitempty"`
+}
+
+// ---------------------------------------------------------------------------
+// Native engine protocol: POST /mwip/v1/generate
+// ---------------------------------------------------------------------------
+
+// GenerateRequest is the intermediate state with execution fields. The
+// engine parses its own output (reasoning, tool calls, stop sequences,
+// structured output) with ParsingOptions and Conversation, and answers with
+// an NDJSON stream of GenerateEvent.
+type GenerateRequest struct {
+	RequestID        string           `json:"request_id"` // attempt id, shared by P and D
+	Model            string           `json:"model,omitempty"`
+	TokenIDs         []uint32         `json:"token_ids"`
+	Multimodal       *Multimodal      `json:"multimodal,omitempty"`
+	Conversation     Conversation     `json:"conversation"`
+	InferenceOptions InferenceOptions `json:"inference_options"`
+	ParsingOptions   ParsingOptions   `json:"parsing_options"`
+	Stream           bool             `json:"stream"`
+	Disagg           Disagg           `json:"disagg"`
+	TimeoutMS        int64            `json:"timeout_ms,omitempty"`
+	SessionKey       string           `json:"session_key,omitempty"`
+	Priority         string           `json:"priority,omitempty"`
+}
+
+// Event types of the engine output stream.
+const (
+	EventAccepted    = "accepted"     // D registered (push)
+	EventPrefillDone = "prefill_done" // P finished
+	EventReady       = "ready"        // output starts (gateway internal)
+	EventDelta       = "delta"        // parsed output
+	EventFinish      = "finish"
+	EventError       = "error"
+)
+
+// GenerateEvent is one event of an engine output stream: an NDJSON line of
+// the native protocol, and what the vLLM and SGLang adapters translate
+// their chunks into.
+type GenerateEvent struct {
+	Type string `json:"type"`
+
+	Receiver         *KVReceiver    `json:"kv_receiver,omitempty"`
+	Handle           *KVHandle      `json:"kv_handle,omitempty"`
+	KVTransferParams map[string]any `json:"kv_transfer_params,omitempty"`
+	PromptTokens     int            `json:"prompt_tokens,omitempty"`
+	CachedTokens     int            `json:"cached_tokens,omitempty"`
+
+	// delta: parsed by the engine
+	Content   string           `json:"content,omitempty"`
+	Reasoning string           `json:"reasoning,omitempty"`
+	ToolCalls []DeltaToolCall  `json:"tool_calls,omitempty"`
+	TokenIDs  []uint32         `json:"token_ids,omitempty"`
+	Logprobs  []LogprobContent `json:"logprobs,omitempty"`
+
+	// finish
+	Reason     string  `json:"reason,omitempty"`      // stop | length | tool_calls | content_filter
+	StopReason string  `json:"stop_reason,omitempty"` // matched stop string
+	Usage      *Usage  `json:"usage,omitempty"`
+	Timing     *Timing `json:"timing,omitempty"`
+
+	// error
+	Code      string `json:"code,omitempty"`
+	Message   string `json:"message,omitempty"`
+	Retriable bool   `json:"retriable,omitempty"`
+	WorkerID  string `json:"worker_id,omitempty"`
+}
+
+// ---------------------------------------------------------------------------
+// Native encode protocol: POST /mwip/v1/encode
+// ---------------------------------------------------------------------------
+
+// EmbeddingArtifact is the encoder output of one placement.
+type EmbeddingArtifact struct {
+	Reference string `json:"reference"` // placement reference
+	URI       string `json:"uri"`
+	Tokens    int    `json:"tokens"`
+	Encoder   string `json:"encoder,omitempty"`
+}
+
+// EncodeRequest asks an encoder to build the embeddings of media items.
+type EncodeRequest struct {
+	RequestID string      `json:"request_id"`
+	AttemptID string      `json:"attempt_id"`
+	Model     string      `json:"model"`
+	Items     []MediaItem `json:"items"` // as rendered: plan and placements tell what to produce
+	TimeoutMS int64       `json:"timeout_ms,omitempty"`
+}
+
+// EncodeResponse returns one artifact per placement of every item.
+type EncodeResponse struct {
+	Artifacts []EmbeddingArtifact `json:"artifacts"`
+	EncodeMS  float64             `json:"encode_ms,omitempty"`
+	WorkerID  string              `json:"worker_id,omitempty"`
+}
+
+// Error codes reported by engines (event "error" or error bodies).
+const (
+	ErrCapacity       = "capacity_exhausted"   // no room now; retry elsewhere
+	ErrNormalRejected = "normal_rejected"      // decode worker declines non-PD requests
+	ErrKVTransfer     = "kv_transfer_failed"   // KV handoff failed
+	ErrArtifact       = "artifact_unavailable" // embedding missing
+	ErrBadRequest     = "bad_request"
+	ErrTimeout        = "timeout"
+	ErrAborted        = "aborted"
+	ErrInternal       = "internal"
+)
+
+// ErrorBody is the JSON body of a non-2xx response.
+type ErrorBody struct {
+	Type      string `json:"type"` // always "error"
+	Code      string `json:"code"`
+	Message   string `json:"message"`
+	Retriable bool   `json:"retriable,omitempty"`
+}
+
+// AbortRequest is POST /mwip/v1/abort.
+type AbortRequest struct {
+	RequestID string `json:"request_id"`
+}
+
+// ---------------------------------------------------------------------------
+// Control plane
+// ---------------------------------------------------------------------------
+
+// WorkerInfo is the identity part of a heartbeat.
+type WorkerInfo struct {
+	ID                 string            `json:"id"`
+	Model              string            `json:"model"`
+	Role               string            `json:"role"`
+	URL                string            `json:"url"`
+	Normal             bool              `json:"normal,omitempty"` // a decode worker that also runs non-PD requests
+	BootstrapAddr      string            `json:"bootstrap_addr,omitempty"`
+	EngineID           string            `json:"engine_id,omitempty"` // vLLM KV connector engine id
+	KVCapacityTokens   int64             `json:"kv_capacity_tokens,omitempty"`
+	MaxRunningRequests int               `json:"max_running_requests,omitempty"`
+	MaxPrefillTokens   int64             `json:"max_prefill_queue_tokens,omitempty"`
+	BlockSize          int               `json:"block_size,omitempty"`
+	Labels             map[string]string `json:"labels,omitempty"`
+}
+
+// KVEvents is a batch of KV cache events (block hashes per docs/protocol.md).
+type KVEvents struct {
+	Stored  []uint64 `json:"stored,omitempty"`
+	Removed []uint64 `json:"removed,omitempty"`
+	Cleared bool     `json:"cleared,omitempty"`
+}
+
+// Heartbeat is POST /mwip/v1/heartbeat.
+type Heartbeat struct {
+	Worker   WorkerInfo      `json:"worker"`
+	State    json.RawMessage `json:"state,omitempty"` // registry.EngineState
+	KVEvents *KVEvents       `json:"kv_events,omitempty"`
+	Draining bool            `json:"draining,omitempty"`
+}
+
+// HeartbeatAck answers a heartbeat.
+type HeartbeatAck struct {
+	OK    bool  `json:"ok"`
+	TTLMS int64 `json:"ttl_ms"`
+}

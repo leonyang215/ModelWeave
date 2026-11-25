@@ -1,0 +1,37 @@
+global:
+  scrape_interval: 5s
+scrape_configs:
+  - job_name: modelweave-gateway
+    static_configs:
+      - targets: ["gateway:8080", "gateway-events:8080"]
+  - job_name: modelweave-tokenizer
+    static_configs:
+      - targets: ["tokenizer:8090"]
+  - job_name: modelweave-mock-engines
+    static_configs:
+      - targets:
+          - enc-0:9000
+          - prefill-0:9000
+          - prefill-1:9000
+          - decode-0:9000
+          - decode-1:9000
+          - ev-0:9000
+          - pv-0:9000
+          - dv-0:9000
+          - pp-0:9000
+          - dp-0:9000
+          - ps-0:9000
+          - ds-0:9000
+          - es-0:9000
+          - pf-0:9000
+          - df-0:9000
+          - normal-0:9000
+          - normal-1:9000
+          - normal-bad:9000
+          - tiny-0:9000
+          - qwen-p0:9000
+          - qwen-d0:9000
+          - qvl-enc-0:9000
+          - qvl-p0:9000
+          - qvl-d0:9000
+          - qvl-sg-0:9000

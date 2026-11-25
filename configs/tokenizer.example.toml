@@ -1,0 +1,60 @@
+# ModelWeave tokenizer configuration: every model one tokenizer process
+# serves. Requests pick a model by name or alias (the gateway sends a model's
+# tokenizer_model).
+#
+#   bin/modelweave-tokenizer --config configs/tokenizer.example.toml
+#
+# Relative paths are resolved from the working directory (the repository root
+# here; /opt/modelweave in the container image).
+#
+# Per model:
+#   name, aliases          names the gateway may send
+#   family                 prompt format: deepseek-v4.1 | deepseek-v4 | qwen3 | qwen3-vl | chat-template
+#                          (images and videos: deepseek-v4.1 and qwen3-vl; the others reject media)
+#   path                   directory of the model's Hugging Face files: tokenizer.json,
+#                          tokenizer_config.json (chat template, special tokens),
+#                          generation_config.json (stop tokens, sampling defaults),
+#                          preprocessor_config.json / video_preprocessor_config.json (vision)
+#   tokenizer_file, chat_template_file, generation_config_file,
+#   preprocessor_config_file, video_preprocessor_config_file
+#                          single files instead of (or overriding) path
+#   context_length         context window in tokens
+#   default_thinking       thinking when a request does not choose (default true)
+#   thinking               toggle | always | none (chat-template families)
+#   thinking_kwarg         chat template switch of thinking (default enable_thinking)
+#   reasoning_parser       output parser engines apply to reasoning (qwen3, deepseek_v4; "" none)
+#   tool_call_parser       output parser of tool calls (hermes, deepseek_v4; "" none)
+#   stop_tokens            stop tokens (default: generation_config.json eos_token_id)
+#   content_format         string | openai: how the chat template reads content (default: detected)
+#   default_max_tokens, thinking_max_tokens
+#                          max_tokens when a request sets none
+#   [models.vision]        vision overrides: DeepSeek video_temporal_patch_size, video_default_fps,
+#                          video_frame_max_long_side; Qwen-VL patch_size, merge_size,
+#                          temporal_patch_size, image_min_pixels, image_max_pixels,
+#                          video_min_pixels, video_max_pixels, video_fps, video_min_frames,
+#                          video_max_frames, video_max_frame_tokens (0: no per-frame cap)
+
+listen = "0.0.0.0:8090"
+
+[[models]]
+name = "DeepSeek-V4.1-Flash"
+aliases = ["deepseek-v4.1", "deepseek-flash"]
+family = "deepseek-v4.1"
+path = "assets/tokenizers/deepseek-v4.1"
+context_length = 1048576
+
+[[models]]
+name = "Qwen3-8B"
+aliases = ["qwen3"]
+family = "qwen3"
+path = "assets/tokenizers/qwen3"
+context_length = 40960
+
+[[models]]
+name = "Qwen3-VL-8B-Instruct"
+aliases = ["qwen3-vl"]
+family = "qwen3-vl"
+path = "assets/tokenizers/qwen3-vl"
+# Qwen3-VL shares the Qwen3 vocabulary.
+tokenizer_file = "assets/tokenizers/qwen3/tokenizer.json"
+context_length = 262144
