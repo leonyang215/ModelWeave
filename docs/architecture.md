@@ -1,47 +1,24 @@
 # Architecture
 
-ModelWeave is two processes plus the engines they drive:
+ModelWeave separates model-specific rendering from cluster scheduling and
+engine execution. The gateway runs standalone with memory or as replicas
+sharing Redis, including tenant quotas and admission queues.
 
-| Process | Language | Role |
+![ModelWeave system architecture](../assets/diagrams/architecture.svg)
+
+[Editable Graphviz source and PNG export](../assets/diagrams/README.md).
+
+| Component | Language | Responsibility |
 |---|---|---|
-| `modelweave-gateway` | Go | API front (OpenAI Chat Completions / Responses, Anthropic Messages, streaming or not), auth and tenant QoS, admission queue and overload shedding, **instance registry** (the mwip Registry, gRPC: instances of every model by role, heartbeats, expiry, draining), cache- and load-aware scheduling, normal / PD / EPD orchestration, the **mwip** client (gRPC), retries and fallback, **response formatting**, metrics and access logs |
-| `modelweave-tokenizer` | Rust | **protocol conversion and tokenization only**, for every registered model at once: API request → the intermediate state (the conversation rendered into one token list by the model's prompt format, images and videos already expanded to their pad-value positions, generation and parsing options) |
-| engine instances | any | one model in one role each: encode (E), prefill (P), decode (D) or unified. They implement **mwip**, the gRPC protocol of [proto/modelweave/mwip/v1](../proto/modelweave/mwip/v1) ([mwip.md](mwip.md)), the only way engines integrate; they detokenize and **parse** their output. `modelweave-mockengine` simulates them for tests |
+| `modelweave-gateway` | Go | API front, tenant QoS, admission, cache/load scheduling, normal/PD/EPD orchestration, Registry, response formatting and telemetry |
+| `modelweave-tokenizer` | Rust | Stateless API-to-token conversion, model-native prompts, media planning and generation/parsing options |
+| Engine instances | Any | One model/role each; implement [mwip](mwip.md), execute inference, detokenize and parse output |
+| State backend | Memory / Redis | Registry, health, reservations, cache metadata, tenant quotas and admission queues |
 
-The tokenizer serves several model families side by side (§ Tokenizer
-internals): DeepSeek V4 / V4.1 prompts are rendered with
-[deepseek-recipe](https://github.com/deepseek-ai/deepseek-recipe); Qwen3,
-Qwen3-VL and any other model with its Hugging Face chat template, rendered
-like transformers' `apply_chat_template`. Media planning (pad values, pixel
-controls, frame sampling) follows each model's own processor.
-
-```
-                 ┌──────────────────────────────── modelweave-gateway ────────────────────────────────┐
- client ──HTTP──▶│ api ─▶ render ─▶ QoS ─▶ overload ─▶ encode ─▶ plan+queue ─▶ execute ──────▶ format  │──▶ instances
- (stream or not) │          │      limiter  L0–L4        (E)   scheduler   (orchestrator)    (SSE|JSON)│   mwip Engine (gRPC)
-                 │          ▼                                     ▲              │                     │   (always streaming)
-                 │   modelweave-tokenizer         registry ◀── mwip Registry heartbeats / GetState     │
-                 │   (unary /v1/render)           kvindex  ◀── routing / KV events                     │
-                 │                                                engine client: the intermediate      │
-                 │                                                state as an mwip GenerateRequest     │
-                 └────────────────────────────────────────────────────────────────────────────────────┘
-```
-
-Who does what:
-
-* the **tokenizer** converts and tokenizes, and plans media: it knows how many
-  positions every image and video takes, from the caller's metadata and pixel
-  controls, but nothing about engines. It is out of the output path
-  (stateless, unary);
-* the **gateway** schedules every request over the instances of its model,
-  per role, and sends them the intermediate state as is, with PD and EPD in
-  the request's `disagg` and media artifacts (protocol §2);
-* the **engine** applies stop strings, detokenizes and parses reasoning and
-  tool calls, streaming parsed deltas;
-* the **gateway** never parses: it relays the deltas through a formatter that
-  writes the client's protocol, as SSE for streaming clients or as one JSON
-  body for the others. Every engine generate call streams, whatever the
-  client asked.
+The tokenizer is called once per request and is not in the output path.
+Engines always stream parsed events to the gateway; the gateway formats them
+for the client's streaming or non-streaming API. Only metadata is shared
+through Redis—never model weights, KV tensors or HTTP request bodies.
 
 ## Request lifecycle
 

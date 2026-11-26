@@ -1,0 +1,141 @@
+// Editable architecture source. Render with: make diagrams
+// Solid = request/output path; dashed = control/state path.
+digraph ModelWeave {
+  graph [
+    layout=neato,
+    bgcolor="#F8FAFC",
+    pad="0.45",
+    splines=spline,
+    outputorder=edgesfirst,
+    fontname="DejaVu Sans",
+    labelloc=t,
+    labeljust=l,
+    label=<
+      <TABLE BORDER="0" CELLBORDER="0" CELLSPACING="0" CELLPADDING="3">
+        <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="28" COLOR="#0F172A"><B>ModelWeave architecture</B></FONT></TD></TR>
+        <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="15" COLOR="#64748B">Token-native inference · cache-aware routing · shared admission</FONT></TD></TR>
+      </TABLE>
+    >
+  ];
+  node [
+    shape=box,
+    style="rounded,filled",
+    fillcolor="#FFFFFF",
+    color="#CBD5E1",
+    penwidth=1.4,
+    fontname="DejaVu Sans",
+    fontcolor="#334155",
+    fontsize=17,
+    margin="0.28,0.22",
+    pin=true
+  ];
+  edge [
+    color="#2563EB",
+    fontcolor="#475569",
+    fontname="DejaVu Sans",
+    fontsize=15,
+    penwidth=1.8,
+    arrowsize=0.75,
+    arrowhead=normal,
+    arrowtail=normal
+  ];
+
+  apps [pos="170,470!", width=3.4, label=<
+    <TABLE BORDER="0" CELLBORDER="0" CELLSPACING="0" CELLPADDING="5">
+      <TR><TD><FONT POINT-SIZE="23" COLOR="#0F172A"><B>Applications</B></FONT></TD></TR>
+      <TR><TD><FONT POINT-SIZE="16">OpenAI · Anthropic APIs</FONT></TD></TR>
+      <TR><TD><FONT POINT-SIZE="15" COLOR="#64748B">Chat · Responses · Messages</FONT></TD></TR>
+    </TABLE>
+  >];
+
+  gateway [pos="650,470!", width=5.9, color="#3B82F6", fillcolor="#EFF6FF", penwidth=1.8, label=<
+    <TABLE BORDER="0" CELLBORDER="0" CELLSPACING="0" CELLPADDING="6">
+      <TR><TD><FONT POINT-SIZE="12" COLOR="#2563EB"><B>GO · ONE GATEWAY OR MULTIPLE REPLICAS</B></FONT></TD></TR>
+      <TR><TD><FONT POINT-SIZE="26" COLOR="#1E3A8A"><B>ModelWeave Gateway</B></FONT></TD></TR>
+      <TR><TD HEIGHT="8"></TD></TR>
+      <TR><TD>API front &amp; response formatting</TD></TR>
+      <TR><TD>Tenant quotas &amp; admission control</TD></TR>
+      <TR><TD><B>Weighted scheduler</B> · prefix-cache + load</TD></TR>
+      <TR><TD>Normal · PD · EPD orchestration</TD></TR>
+      <TR><TD>Registry &amp; engine-state collection</TD></TR>
+    </TABLE>
+  >];
+
+  engines [pos="1150,470!", width=3.8, label=<
+    <TABLE BORDER="0" CELLBORDER="0" CELLSPACING="5" CELLPADDING="7">
+      <TR><TD COLSPAN="2"><FONT POINT-SIZE="23" COLOR="#0F172A"><B>Engine pools</B></FONT></TD></TR>
+      <TR><TD COLSPAN="2"><FONT POINT-SIZE="12" COLOR="#64748B"><B>PER MODEL · IMPLEMENT MWIP</B></FONT></TD></TR>
+      <TR>
+        <TD BGCOLOR="#ECFDF5"><FONT COLOR="#047857"><B>Encode</B></FONT></TD>
+        <TD BGCOLOR="#FFFBEB"><FONT COLOR="#92400E"><B>Prefill</B></FONT></TD>
+      </TR>
+      <TR>
+        <TD BGCOLOR="#EFF6FF"><FONT COLOR="#1D4ED8"><B>Decode</B></FONT></TD>
+        <TD BGCOLOR="#F5F3FF"><FONT COLOR="#6D28D9"><B>Unified</B></FONT></TD>
+      </TR>
+      <TR><TD COLSPAN="2"><FONT POINT-SIZE="14" COLOR="#64748B">Generate, detokenize &amp; parse</FONT></TD></TR>
+    </TABLE>
+  >];
+
+  tokenizer [pos="370,125!", width=5.8, height=3.07, color="#A78BFA", fillcolor="#F5F3FF", label=<
+    <TABLE BORDER="0" CELLBORDER="0" CELLSPACING="0" CELLPADDING="5">
+      <TR><TD><FONT POINT-SIZE="12" COLOR="#7C3AED"><B>RUST · STATELESS</B></FONT></TD></TR>
+      <TR><TD><FONT POINT-SIZE="23" COLOR="#5B21B6"><B>Tokenizer</B></FONT></TD></TR>
+      <TR><TD><FONT POINT-SIZE="16">Model-native prompts &amp; media plans</FONT></TD></TR>
+      <TR><TD><FONT POINT-SIZE="15" COLOR="#64748B">Token IDs + inference / parsing options</FONT></TD></TR>
+    </TABLE>
+  >];
+
+  backend [pos="930,125!", width=6.0, color="#5EEAD4", fillcolor="#F0FDFA", label=<
+    <TABLE BORDER="0" CELLBORDER="0" CELLSPACING="4" CELLPADDING="6">
+      <TR><TD COLSPAN="2"><FONT POINT-SIZE="23" COLOR="#115E59"><B>State backend</B></FONT></TD></TR>
+      <TR><TD COLSPAN="2"><FONT POINT-SIZE="14" COLOR="#0F766E">One switch: state.backend</FONT></TD></TR>
+      <TR>
+        <TD BGCOLOR="#E2E8F0"><B>Memory</B><BR/><FONT POINT-SIZE="14">Inside one gateway</FONT></TD>
+        <TD BGCOLOR="#CCFBF1"><B>Redis</B><BR/><FONT POINT-SIZE="14">Shared across replicas</FONT></TD>
+      </TR>
+      <TR><TD COLSPAN="2"><FONT POINT-SIZE="15">Registry · leases · cache metadata</FONT></TD></TR>
+      <TR><TD COLSPAN="2"><FONT POINT-SIZE="15">Tenant quotas · priority / VTC queues</FONT></TD></TR>
+    </TABLE>
+  >];
+
+  // Explicit splines keep the control plane clear of the request path.
+  // Coordinates are Graphviz points; `neato -n2` preserves this layout.
+  apps -> gateway [
+    dir=both,
+    label="HTTP APIs\nSSE / JSON",
+    lp="370,495",
+    pos="s,303,470 e,437,470 311,470 346,470 395,470 429,470"
+  ];
+  gateway -> engines [
+    dir=both,
+    label="mwip · gRPC\ntokens / deltas",
+    lp="935,495",
+    pos="s,863,470 e,1007,470 871,470 909,470 961,470 999,470"
+  ];
+  engines -> gateway [
+    color="#0F766E",
+    fontcolor="#0F766E",
+    style=dashed,
+    label="Registry heartbeats · load · KV events",
+    lp="900,677",
+    pos="e,650,603 1150,582 1150,605 1150,650 1125,650 1010,650 800,650 675,650 650,650 650,625 650,611"
+  ];
+  gateway -> tokenizer [
+    dir=both,
+    color="#7C3AED",
+    fontcolor="#7C3AED",
+    label="Render once\nPOST /v1/render",
+    lp="360,300",
+    pos="s,520,337 e,370,236 520,329 520,300 370,285 370,244"
+  ];
+  gateway -> backend [
+    dir=both,
+    color="#0F766E",
+    fontcolor="#0F766E",
+    style=dashed,
+    label="Atomic state\n& QoS",
+    lp="975,300",
+    pos="s,780,337 e,930,236 780,329 780,300 930,285 930,244"
+  ];
+}

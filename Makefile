@@ -3,9 +3,10 @@ GO      ?= go
 CARGO   ?= cargo
 COMPOSE ?= docker compose -f deploy/compose/docker-compose.yaml
 PROTOC  ?= protoc
+PYTHON  ?= python3
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
-.PHONY: all build build-go build-tokenizer proto test test-go test-rust lint images up down e2e e2e-host clean
+.PHONY: all build build-go build-tokenizer proto diagrams test test-go test-rust lint images up down e2e e2e-host clean
 
 all: build
 
@@ -35,6 +36,10 @@ test-go:
 
 test-rust:
 	cd tokenizer && $(CARGO) test --locked
+
+# Editable architecture artwork; generated SVG/PNG are committed.
+diagrams:
+	$(PYTHON) tools/render_diagrams.py
 
 lint:
 	gofmt -l api cmd internal test | (! grep .)
