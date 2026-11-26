@@ -1,6 +1,6 @@
 // Package format renders engine output as client responses. Engines parse
-// their own output (vLLM output_mode "derender"): what reaches the gateway
-// are content, reasoning and tool-call deltas. A Formatter turns them into
+// their own output (mwip ParsingOptions): what reaches the gateway are
+// content, reasoning and tool-call deltas. A Formatter turns them into
 // OpenAI Chat Completions, OpenAI Responses or Anthropic Messages, streamed
 // as server-sent events or aggregated into one JSON body. Engines are
 // always called streaming; only the formatter knows whether the client

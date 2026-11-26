@@ -5,9 +5,10 @@ package gateway
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -107,7 +108,8 @@ func New(cfg *config.Config, log *slog.Logger, version string) (*Server, error) 
 		s.index, s.events = ev, ev
 	case "remote":
 		s.index = &kvindex.Remote{
-			URL: ki.RemoteURL, Timeout: ki.RemoteTimeout.D(), Client: s.eng.HTTP(),
+			URL: ki.RemoteURL, Timeout: ki.RemoteTimeout.D(),
+			Client:   &http.Client{Transport: &http.Transport{MaxIdleConnsPerHost: 64, IdleConnTimeout: 90 * time.Second}},
 			Fallback: kvindex.NewApprox(ki.TTL.D(), capacity),
 			OnResult: func(outcome string, d time.Duration) {
 				met.CacheLookup.WithLabelValues("remote_"+outcome, outcome).Observe(d.Seconds())
@@ -132,20 +134,13 @@ func New(cfg *config.Config, log *slog.Logger, version string) (*Server, error) 
 		rt := &orchestrator.Model{
 			Cfg:       mc,
 			Name:      mc.Name,
-			Protocol:  mc.EngineProtocol,
 			BlockSize: ki.BlockSize,
 			Seed:      kvindex.ModelSeed(mc.Name),
 			Artifacts: orchestrator.NewArtifactCache(mc.Encode.ArtifactCacheTTL.D(), mc.Encode.ArtifactCacheMax),
 			Sessions:  orchestrator.NewSessionMap(mc.Normal.SessionTTL.D()),
 		}
-		gwEncode := engine.EncodeInGateway(mc.EngineProtocol)
-		log.Info("model configured", "model", mc.Name, "mode", mc.Mode, "engine_protocol", mc.EngineProtocol,
-			"pd_handshake", mc.PD.Handshake, "encode_in_gateway", gwEncode)
-		if !gwEncode {
-			log.Info("encode stage is engine-managed: media are sent to the prefill engine, which dispatches them to its own encoders",
-				"model", mc.Name, "engine_protocol", mc.EngineProtocol)
-		}
-		met.ModelInfo.WithLabelValues(mc.Name, mc.EngineProtocol, mc.Mode, mc.PD.Handshake, strconv.FormatBool(gwEncode)).Set(1)
+		log.Info("model configured", "model", mc.Name, "mode", mc.Mode, "pd_handshake", mc.PD.Handshake)
+		met.ModelInfo.WithLabelValues(mc.Name, mc.Mode, mc.PD.Handshake).Set(1)
 		var err error
 		if rt.Prefill, err = build(registry.RolePrefill, mc.Routing.Prefill); err != nil {
 			return nil, err
@@ -187,7 +182,7 @@ func New(cfg *config.Config, log *slog.Logger, version string) (*Server, error) 
 			if spec.KVCapacityTokens > 0 && ki.BlockSize > 0 && capacity == 0 {
 				s.index.SetWorkerCapacity(spec.ID, int(spec.KVCapacityTokens)/ki.BlockSize)
 			}
-			s.log.Info("worker "+ev.Kind, "worker", spec.ID, "model", spec.Model, "role", spec.Role, "url", spec.URL, "source", ev.Worker.Source)
+			s.log.Info("worker "+ev.Kind, "worker", spec.ID, "model", spec.Model, "role", spec.Role, "target", spec.Target, "source", ev.Worker.Source)
 		}
 		if m := s.models[spec.Model]; m != nil {
 			m.queue.Notify()
@@ -218,9 +213,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/responses", s.handleAPI("responses"))
 	mux.HandleFunc("POST /v1/messages", s.handleAPI("messages"))
 	mux.HandleFunc("GET /v1/models", s.handleModels)
-	mux.HandleFunc("POST /mwip/v1/heartbeat", s.control(s.handleHeartbeat))
-	mux.HandleFunc("POST /mwip/v1/kv_events", s.control(s.handleKVEvents))
-	mux.HandleFunc("POST /mwip/v1/deregister", s.control(s.handleDeregister))
 	mux.HandleFunc("GET /admin/workers", s.control(s.handleWorkers))
 	mux.HandleFunc("POST /admin/workers/{id}/drain", s.control(s.handleDrain))
 	mux.HandleFunc("GET /admin/stats", s.control(s.handleStats))
@@ -236,7 +228,8 @@ func (s *Server) Handler() http.Handler {
 	return mux
 }
 
-// Run serves until ctx is canceled, then drains.
+// Run serves the API (HTTP) and the mwip Registry (gRPC) until ctx is
+// canceled, then drains.
 func (s *Server) Run(ctx context.Context) error {
 	bg, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -247,21 +240,38 @@ func (s *Server) Run(ctx context.Context) error {
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
-	errc := make(chan error, 1)
+	lis, err := net.Listen("tcp", s.cfg.Server.GRPCListen)
+	if err != nil {
+		return fmt.Errorf("mwip registry listener: %w", err)
+	}
+	gsrv, hs := s.newGRPCServer()
+	errc := make(chan error, 2)
 	go func() { errc <- srv.ListenAndServe() }()
-	s.log.Info("modelweave gateway listening", "addr", s.cfg.Server.Listen, "version", s.version,
+	go func() { errc <- gsrv.Serve(lis) }()
+	s.log.Info("modelweave gateway listening", "addr", s.cfg.Server.Listen, "mwip_registry", lis.Addr().String(), "version", s.version,
 		"models", len(s.models), "static_workers", len(s.cfg.Discovery.Workers), "kv_index", s.index.Kind())
 	select {
 	case err := <-errc:
+		gsrv.Stop()
+		_ = srv.Close()
 		return err
 	case <-ctx.Done():
 	}
 	s.ready.Store(false)
+	hs.Shutdown()
 	s.log.Info("shutting down, draining requests", "grace", s.cfg.Server.ShutdownGrace.D().String())
 	sctx, scancel := context.WithTimeout(context.Background(), s.cfg.Server.ShutdownGrace.D())
 	defer scancel()
-	err := srv.Shutdown(sctx)
+	stopped := make(chan struct{})
+	go func() { gsrv.GracefulStop(); close(stopped) }()
+	err = srv.Shutdown(sctx)
+	select {
+	case <-stopped:
+	case <-sctx.Done():
+		gsrv.Stop()
+	}
 	cancel()
+	defer s.eng.Close()
 	for _, m := range s.models {
 		m.queue.Close()
 	}
@@ -290,8 +300,9 @@ func (s *Server) startBackground(ctx context.Context) {
 		}()
 	}
 	every(time.Second, func() {
-		for _, id := range s.reg.Sweep() {
-			s.log.Warn("worker heartbeat expired", "worker", id)
+		for _, spec := range s.reg.Sweep() {
+			s.met.InstanceRemovals.WithLabelValues(spec.Model, string(spec.Role), "expired").Inc()
+			s.log.Warn("instance expired: no heartbeat", "worker", spec.ID, "model", spec.Model, "role", spec.Role, "ttl", s.reg.TTL().String())
 		}
 	})
 	every(30*time.Second, func() {
@@ -304,9 +315,9 @@ func (s *Server) startBackground(ctx context.Context) {
 	})
 	every(time.Second, s.updateOverload)
 	if p := s.cfg.EngineState.Poll; p.Enabled {
-		poller := enginestate.NewPoller(s.reg, s.eng.HTTP(), enginestate.Options{
-			Format: p.Format, Preset: p.Preset, Metrics: p.Metrics, Timeout: p.Timeout.D(),
-			OnResult: func(format, outcome string) { s.met.StatePolls.WithLabelValues(format, outcome).Inc() },
+		poller := enginestate.NewPoller(s.reg, enginestate.Options{
+			Timeout: p.Timeout.D(), State: s.eng.State,
+			OnResult: func(outcome string) { s.met.StatePolls.WithLabelValues(outcome).Inc() },
 		})
 		every(p.Interval.D(), func() { poller.PollAll(ctx) })
 	}

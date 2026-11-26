@@ -39,7 +39,6 @@ type peekBody struct {
 // record accumulates everything the access log and metrics report.
 type record struct {
 	ID, API, Model, Tenant, Priority string
-	EngineProtocol                   string
 	Stream                           bool
 	Arrived                          time.Time
 	Status                           int
@@ -146,7 +145,7 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request, protocol strin
 		fail(&apiError{Status: http.StatusNotFound, Kind: "model_not_found", Message: fmt.Sprintf("model %q is not served", peek.Model)})
 		return
 	}
-	rec.Model, rec.EngineProtocol = m.cfg.Name, m.rt.Protocol
+	rec.Model = m.cfg.Name
 	s.met.Inflight.WithLabelValues(m.cfg.Name).Inc()
 	defer s.met.Inflight.WithLabelValues(m.cfg.Name).Dec()
 
@@ -188,16 +187,6 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request, protocol strin
 			s.met.MediaTokens.WithLabelValues(m.cfg.Name, it.Modality).Add(float64(it.Span.Length))
 		}
 	}
-	// Engines that expand media themselves (vLLM, SGLang) take each item as
-	// the model's placeholder; a model without one for a modality (DeepSeek
-	// V4.1 videos) can only be served over mwip.
-	if m.rt.Protocol != mwip.EngineMWIP {
-		if err := engine.Collapsible(rr.Multimodal); err != nil {
-			fail(badRequest(fmt.Sprintf("model %s is served over %s and %v", m.cfg.Name, m.rt.Protocol, err)))
-			return
-		}
-	}
-
 	// 2. Build the job and its prefix-cache block hashes. Media positions
 	// hold their pad values, so the token list hashes as is.
 	job := &orchestrator.Job{
@@ -523,7 +512,7 @@ func (s *Server) finish(rec *record) {
 		slog.Int("engine_cached_tokens", rec.EngineCached), slog.String("finish_reason", rec.FinishReason),
 		slog.String("admission", rec.Admission), slog.Bool("queued", rec.Queued),
 		slog.Float64("tokenize_ms", ms(rec.TokenizeDur)), slog.Float64("queue_ms", ms(rec.QueueDur)),
-		slog.Int("images", rec.Images), slog.Int("videos", rec.Videos), slog.String("engine_protocol", rec.EngineProtocol),
+		slog.Int("images", rec.Images), slog.Int("videos", rec.Videos),
 		slog.Float64("encode_ms", ms(rec.EncodeDur)), slog.Int("encoded_items", rec.Encoded), slog.Int("artifact_hits", rec.ArtifactHits),
 		slog.Float64("register_ms", ms(rec.RegisterDur)), slog.Float64("prefill_ms", ms(rec.PrefillDur)),
 		slog.Float64("ttft_ms", ms(ttft)), slog.Float64("e2e_ms", ms(e2e)),

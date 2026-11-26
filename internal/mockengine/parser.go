@@ -57,8 +57,8 @@ type parserOpts struct {
 	newID       func() string
 }
 
-// parser is the engine-side output parser, what vLLM's output_mode
-// "derender" runs with its reasoning and tool parsers: it turns the
+// parser is the engine-side output parser that mwip asks engines to run
+// (ParsingOptions: reasoning and tool-call parsers): it turns the
 // detokenized stream into reasoning, content and tool-call deltas. Markup
 // split across tokens is held back until it is complete.
 //
@@ -323,7 +323,7 @@ func paramHeader(h string) (string, bool) {
 	return name, !strings.Contains(rest, `string="false`)
 }
 
-// stopper applies stop strings to the detokenized output like vLLM's
+// stopper applies stop strings to the detokenized output like an engine's
 // detokenizer: text that may begin a stop string is held back, and output
 // ends before the first match.
 type stopper struct {

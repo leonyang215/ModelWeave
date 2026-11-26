@@ -75,10 +75,13 @@ type Metrics struct {
 	Utilization   *prometheus.GaugeVec
 
 	Heartbeats *prometheus.CounterVec
-	KVEvents   *prometheus.CounterVec
-	StatePolls *prometheus.CounterVec
-	BuildInfo  *prometheus.GaugeVec
-	ModelInfo  *prometheus.GaugeVec
+	// InstanceRemovals counts instances leaving the registry (deregistered,
+	// expired).
+	InstanceRemovals *prometheus.CounterVec
+	KVEvents         *prometheus.CounterVec
+	StatePolls       *prometheus.CounterVec
+	BuildInfo        *prometheus.GaugeVec
+	ModelInfo        *prometheus.GaugeVec
 
 	MediaItems  *prometheus.CounterVec
 	MediaTokens *prometheus.CounterVec
@@ -159,8 +162,8 @@ func NewMetrics() *Metrics {
 		Name: "modelweave_upstream_errors_total", Help: "Errors returned by workers by role and MWIP error code.",
 	}, []string{"model", "role", "code"})
 	m.EngineRequests = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "modelweave_engine_requests_total", Help: "Calls sent to workers by role (encode, prefill, decode, unified) and engine protocol (mwip, vllm, sglang). Generate calls always stream; encode calls are unary.",
-	}, []string{"model", "role", "protocol"})
+		Name: "modelweave_engine_requests_total", Help: "mwip calls sent to instances by role (encode, prefill, decode, unified). Generate calls always stream; Encode calls are unary.",
+	}, []string{"model", "role"})
 	m.Aborts = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "modelweave_aborts_total", Help: "Engine requests aborted by the gateway by reason (client_gone, stopped, timeout, error).",
 	}, []string{"model", "reason"})
@@ -186,17 +189,20 @@ func NewMetrics() *Metrics {
 		Name: "modelweave_pool_utilization", Help: "Pool utilization used by the overload controller.",
 	}, []string{"model", "role"})
 	m.Heartbeats = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "modelweave_heartbeats_total", Help: "Worker heartbeats by result (registered, updated, rejected).",
+		Name: "modelweave_heartbeats_total", Help: "mwip Registry heartbeats by result (registered, updated, rejected).",
 	}, []string{"result"})
+	m.InstanceRemovals = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "modelweave_instance_removals_total", Help: "Instances removed from the registry by reason: deregistered (Registry.Deregister) or expired (no heartbeat for discovery.heartbeat_ttl).",
+	}, []string{"model", "role", "reason"})
 	m.KVEvents = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "modelweave_kv_events_total", Help: "KV cache events received from engines.",
 	}, []string{"kind"})
 	m.StatePolls = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "modelweave_engine_state_polls_total", Help: "Engine state polls by format and outcome.",
-	}, []string{"format", "outcome"})
+		Name: "modelweave_engine_state_polls_total", Help: "Engine.GetState polls by outcome (ok, error).",
+	}, []string{"outcome"})
 	m.ModelInfo = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "modelweave_model_info", Help: "Configuration of a served model (1): engine protocol chosen by config or startup option, mode, PD handshake, and whether the gateway runs the encode stage.",
-	}, []string{"model", "engine_protocol", "mode", "handshake", "gateway_encode"})
+		Name: "modelweave_model_info", Help: "Configuration of a served model (1): mode and PD handshake.",
+	}, []string{"model", "mode", "handshake"})
 	m.MediaItems = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "modelweave_media_items_total", Help: "Images and videos in rendered requests by modality.",
 	}, []string{"model", "modality"})
@@ -212,7 +218,7 @@ func NewMetrics() *Metrics {
 		m.TokenizerDuration, m.TokenizerDown, m.ScheduleDecisions, m.ScheduleFailures, m.ScheduleDuration, m.CacheMatchRatio,
 		m.CacheLookup, m.ExecutionMode, m.Fallbacks, m.Retries, m.UpstreamErrors, m.EngineRequests, m.Aborts, m.ArtifactLookup,
 		m.Admission, m.RateLimited, m.QueueDepth, m.QueueWait, m.OverloadLevel, m.Utilization,
-		m.Heartbeats, m.KVEvents, m.StatePolls, m.BuildInfo, m.ModelInfo, m.MediaItems, m.MediaTokens,
+		m.Heartbeats, m.InstanceRemovals, m.KVEvents, m.StatePolls, m.BuildInfo, m.ModelInfo, m.MediaItems, m.MediaTokens,
 	} {
 		f(c)
 	}

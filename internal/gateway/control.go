@@ -3,7 +3,6 @@ package gateway
 import (
 	"crypto/subtle"
 	"encoding/json"
-	"io"
 	"net/http"
 	"sort"
 	"time"
@@ -13,8 +12,9 @@ import (
 	"github.com/leonyang215/ModelWeave/internal/registry"
 )
 
-// control guards control-plane and admin endpoints with the optional shared
-// token (constant-time comparison).
+// control guards the admin endpoints with the optional shared token
+// (constant-time comparison). The engine control plane is the gRPC
+// Registry (registry_service.go).
 func (s *Server) control(h http.HandlerFunc) http.HandlerFunc {
 	token := s.cfg.Server.ControlToken
 	if token == "" {
@@ -41,68 +41,7 @@ func controlError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, mwip.ErrorBody{Type: "error", Code: mwip.ErrBadRequest, Message: msg})
 }
 
-// handleHeartbeat registers or refreshes a worker and records its state.
-func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
-	var hb mwip.Heartbeat
-	if err := json.NewDecoder(io.LimitReader(r.Body, 8<<20)).Decode(&hb); err != nil {
-		s.met.Heartbeats.WithLabelValues("rejected").Inc()
-		controlError(w, http.StatusBadRequest, "invalid heartbeat: "+err.Error())
-		return
-	}
-	m := s.byName[hb.Worker.Model]
-	if m == nil {
-		s.met.Heartbeats.WithLabelValues("rejected").Inc()
-		controlError(w, http.StatusBadRequest, "heartbeat for unknown model "+hb.Worker.Model)
-		return
-	}
-	role, err := registry.ParseRole(hb.Worker.Role)
-	if err != nil {
-		s.met.Heartbeats.WithLabelValues("rejected").Inc()
-		controlError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	spec := registry.Spec{
-		ID: hb.Worker.ID, Model: m.cfg.Name, Role: role, URL: hb.Worker.URL, Normal: hb.Worker.Normal,
-		BootstrapAddr: hb.Worker.BootstrapAddr, EngineID: hb.Worker.EngineID, KVCapacityTokens: hb.Worker.KVCapacityTokens,
-		MaxRunningRequests: hb.Worker.MaxRunningRequests, MaxPrefillTokens: hb.Worker.MaxPrefillTokens,
-		Labels: hb.Worker.Labels,
-	}
-	if existing := s.reg.Get(spec.ID); existing != nil && existing.Source == "static" {
-		// Static workers keep their configured identity; heartbeats only
-		// contribute state.
-		spec = existing.Spec()
-	}
-	wk, created, err := s.reg.Upsert(spec, "heartbeat")
-	if err != nil {
-		s.met.Heartbeats.WithLabelValues("rejected").Inc()
-		controlError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	now := time.Now()
-	if len(hb.State) > 0 && string(hb.State) != "null" {
-		var st registry.EngineState
-		if err := json.Unmarshal(hb.State, &st); err != nil {
-			s.met.Heartbeats.WithLabelValues("rejected").Inc()
-			controlError(w, http.StatusBadRequest, "invalid state: "+err.Error())
-			return
-		}
-		wk.UpdateState(st, now)
-	} else {
-		wk.Touch(now)
-	}
-	wk.SetDraining(hb.Draining)
-	if hb.KVEvents != nil {
-		s.applyKVEvents(spec.ID, hb.KVEvents)
-	}
-	if created {
-		s.met.Heartbeats.WithLabelValues("registered").Inc()
-	} else {
-		s.met.Heartbeats.WithLabelValues("updated").Inc()
-	}
-	m.queue.Notify()
-	writeJSON(w, http.StatusOK, mwip.HeartbeatAck{OK: true, TTLMS: s.reg.TTL().Milliseconds()})
-}
-
+// applyKVEvents feeds KV cache events of an instance to the event index.
 func (s *Server) applyKVEvents(worker string, ev *mwip.KVEvents) {
 	if s.events == nil {
 		return
@@ -115,45 +54,19 @@ func (s *Server) applyKVEvents(worker string, ev *mwip.KVEvents) {
 	}
 }
 
-// handleKVEvents ingests KV cache events: {"worker_id": "...", "stored": [...], ...}.
-func (s *Server) handleKVEvents(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		WorkerID string `json:"worker_id"`
-		mwip.KVEvents
-	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 32<<20)).Decode(&req); err != nil || req.WorkerID == "" {
-		controlError(w, http.StatusBadRequest, "invalid kv events")
-		return
-	}
-	if s.reg.Get(req.WorkerID) == nil {
-		controlError(w, http.StatusNotFound, "unknown worker "+req.WorkerID)
-		return
-	}
-	s.applyKVEvents(req.WorkerID, &req.KVEvents)
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": s.events != nil})
-}
-
-func (s *Server) handleDeregister(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		WorkerID string `json:"worker_id"`
-	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil || req.WorkerID == "" {
-		controlError(w, http.StatusBadRequest, "worker_id required")
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]bool{"removed": s.reg.Remove(req.WorkerID)})
-}
-
 type workerView struct {
-	ID              string                `json:"id"`
-	Model           string                `json:"model"`
-	Role            registry.Role         `json:"role"`
-	URL             string                `json:"url"`
-	Protocol        string                `json:"protocol"`         // engine protocol the gateway speaks to it
-	Normal          bool                  `json:"normal,omitempty"` // runs normal (non-PD) requests
-	Source          string                `json:"source"`
-	Healthy         bool                  `json:"healthy"`
-	Draining        bool                  `json:"draining"`
+	ID           string        `json:"id"`
+	Model        string        `json:"model"`
+	Role         registry.Role `json:"role"`
+	Target       string        `json:"target"`           // mwip target
+	Normal       bool          `json:"normal,omitempty"` // runs normal (non-PD) requests
+	Source       string        `json:"source"`           // heartbeat or static
+	Healthy      bool          `json:"healthy"`
+	Draining     bool          `json:"draining"`                // takes no new requests
+	AdminDrained bool          `json:"admin_drained,omitempty"` // drained through the admin API
+	// HeartbeatAgeMS is the time since the last heartbeat; the instance
+	// expires when it passes the heartbeat TTL (heartbeat instances).
+	HeartbeatAgeMS  int64                 `json:"heartbeat_age_ms,omitempty"`
 	Inflight        int64                 `json:"inflight"`
 	ReservedKV      int64                 `json:"reserved_kv_tokens"`
 	InflightPrefill int64                 `json:"inflight_prefill_tokens"`
@@ -164,13 +77,6 @@ type workerView struct {
 	Completed       int64                 `json:"completed"`
 	Errors          int64                 `json:"errors"`
 	CachedBlocks    int                   `json:"index_blocks,omitempty"`
-}
-
-func (s *Server) protocolOf(model string) string {
-	if m := s.models[model]; m != nil {
-		return m.rt.Protocol
-	}
-	return ""
 }
 
 func (s *Server) handleWorkers(w http.ResponseWriter, _ *http.Request) {
@@ -187,10 +93,13 @@ func (s *Server) handleWorkers(w http.ResponseWriter, _ *http.Request) {
 		snap := wk.Snapshot(now, s.cfg.EngineState.StaleAfter.D())
 		done, errs := wk.Counters()
 		v := workerView{
-			ID: snap.Spec.ID, Model: snap.Spec.Model, Role: snap.Spec.Role, URL: snap.Spec.URL, Protocol: s.protocolOf(snap.Spec.Model), Normal: snap.Spec.ServesNormal(),
-			Source: wk.Source, Healthy: snap.Healthy, Draining: snap.Draining, Inflight: snap.Inflight,
+			ID: snap.Spec.ID, Model: snap.Spec.Model, Role: snap.Spec.Role, Target: snap.Spec.Target, Normal: snap.Spec.ServesNormal(),
+			Source: wk.Source, Healthy: snap.Healthy, Draining: snap.Draining, AdminDrained: wk.AdminDrained(), Inflight: snap.Inflight,
 			ReservedKV: snap.ReservedKV, InflightPrefill: snap.PrefillTok, EffectiveKVUsed: snap.EffectiveKVUsed,
 			KVCapacity: snap.KVCapacity, Completed: done, Errors: errs, CachedBlocks: perWorker[snap.Spec.ID],
+		}
+		if wk.Source == "heartbeat" {
+			v.HeartbeatAgeMS = max(now.Sub(snap.LastSeen).Milliseconds(), 1)
 		}
 		if snap.HasState {
 			st := snap.State
@@ -225,7 +134,6 @@ func (s *Server) handleStats(w http.ResponseWriter, _ *http.Request) {
 		level, util := m.overload.Level()
 		models[n] = map[string]any{
 			"mode":             m.cfg.Mode,
-			"engine_protocol":  m.rt.Protocol,
 			"handshake":        m.cfg.PD.Handshake,
 			"queue_len":        m.queue.Len(),
 			"overload_level":   level,

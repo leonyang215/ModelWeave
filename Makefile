@@ -2,9 +2,10 @@
 GO      ?= go
 CARGO   ?= cargo
 COMPOSE ?= docker compose -f deploy/compose/docker-compose.yaml
+PROTOC  ?= protoc
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
-.PHONY: all build build-go build-tokenizer test test-go test-rust lint images up down e2e e2e-host clean
+.PHONY: all build build-go build-tokenizer proto test test-go test-rust lint images up down e2e e2e-host clean
 
 all: build
 
@@ -17,17 +18,26 @@ build-tokenizer:
 	cd tokenizer && $(CARGO) build --release --locked
 	install -D tokenizer/target/release/modelweave-tokenizer bin/modelweave-tokenizer
 
+# Go code of the mwip protocol (proto/ -> api/). Needs protoc 3.15+ with
+# protoc-gen-go and protoc-gen-go-grpc on PATH; the generated code is
+# committed, so building does not.
+proto:
+	$(PROTOC) -I proto \
+	  --go_out=. --go_opt=module=github.com/leonyang215/ModelWeave \
+	  --go-grpc_out=. --go-grpc_opt=module=github.com/leonyang215/ModelWeave \
+	  proto/modelweave/mwip/v1/*.proto
+
 test: test-go test-rust
 
 test-go:
 	$(GO) vet ./...
-	$(GO) test -race -count=1 ./internal/...
+	$(GO) test -race -count=1 ./api/... ./internal/...
 
 test-rust:
 	cd tokenizer && $(CARGO) test --locked
 
 lint:
-	gofmt -l cmd internal test | (! grep .)
+	gofmt -l api cmd internal test | (! grep .)
 	cd tokenizer && $(CARGO) fmt --check && $(CARGO) clippy --locked --all-targets -- -D warnings
 
 # Container images (BuildKit; pass proxies through when needed).

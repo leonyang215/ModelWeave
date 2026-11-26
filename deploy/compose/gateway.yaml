@@ -6,7 +6,8 @@ server:
   expose_routing_headers: true
   first_token_timeout: 30s
   idle_timeout: 30s
-  control_token: ${MW_CONTROL_TOKEN}     # workers and admin calls send X-ModelWeave-Token
+  grpc_listen: ":8081"                    # mwip Registry: engine instances register here
+  control_token: ${MW_CONTROL_TOKEN}     # instances send it as x-modelweave-token, admin calls as X-ModelWeave-Token
 tokenizer:
   endpoints: ["http://tokenizer:8090"]
 auth:
@@ -17,25 +18,21 @@ tenants:
   - {name: limited, api_keys: ["sk-limited"], priority: normal, rpm: 3}
   - {name: batch, api_keys: ["sk-batch"], priority: low}
 discovery:
-  heartbeat_ttl: 6s
+  heartbeat_ttl: 6s                       # an instance whose heartbeats stop expires after this
   workers:
-    # Registered statically (no heartbeat); its load comes from /metrics polling.
-    - {id: tiny-0, model: deepseek-v4.1-tiny, role: unified, url: "http://tiny-0:9000", max_running_requests: 1}
+    # Listed here instead of heartbeating: it never expires, and its load
+    # comes from polling Engine.GetState.
+    - {id: tiny-0, model: deepseek-v4.1-tiny, role: unified, target: "tiny-0:9001", max_running_requests: 1}
 engine_state:
   stale_after: 5s
-  poll: {enabled: true, interval: 1s, format: prometheus, preset: modelweave}
+  poll: {enabled: true, interval: 1s}
 health: {failure_threshold: 2, cooldown: 30s}
 kv_index: {type: approx, block_size: 64, ttl: 30m}
 
-# Default engine protocol of this replica: the tokenizer's intermediate state
-# as is (POST /mwip/v1/generate). Models below override it where they test the
-# vLLM and SGLang adapters; the gateway-events replica is started with
-# -engine-protocol vllm instead.
-engine:
-  protocol: mwip
-
+# Every model is served by its own instances, in the roles encode, prefill,
+# decode and unified; they implement mwip and register by heartbeat.
 models:
-  # mwip: auto normal/pd, push handshake, EPD with cached embedding artifacts.
+  # auto normal/pd, push handshake, EPD with cached embedding artifacts.
   - name: deepseek-v4.1
     aliases: ["DeepSeek-V4.1-Flash", "deepseek-flash"]
     tokenizer_model: DeepSeek-V4.1-Flash
@@ -49,38 +46,19 @@ models:
     admission:
       overload: {enabled: true}
 
-  # vLLM adapter: token-in /inference/v1/generate (derender), PD through
-  # MooncakeConnector-style kv_transfer_params (bootstrap), EPD through an
-  # EC producer (ec_transfer_params), normal on the decode worker.
-  - name: deepseek-v4.1-vllm
-    tokenizer_model: DeepSeek-V4.1-Flash
-    engine_protocol: vllm
-    mode: auto
-    pd: {handshake: bootstrap}
-    normal: {enabled: true, max_uncached_tokens: 512, fallback_to_pd: true}
-
-  # mwip, pull handshake: P returns a kv_handle, D fetches the KV.
+  # pull handshake: P returns a kv_handle, D fetches the KV.
   - name: deepseek-v4.1-pull
     tokenizer_model: DeepSeek-V4.1-Flash
     mode: pd
     pd: {handshake: pull}
 
-  # SGLang adapter (POST /generate, bootstrap_host/port/room). Media go to
-  # the prefill server raw (image_data): SGLang encodes them on its own
-  # encoders, so the registered encoder is never called by the gateway.
-  # SGLang's native API returns raw text: no engine-side parsing.
-  - name: deepseek-v4.1-sglang
-    tokenizer_model: DeepSeek-V4.1-Flash
-    engine_protocol: sglang
-    mode: pd
-
-  # normal rejected by the decode worker -> pd.
+  # normal rejected by the decode instance -> pd.
   - name: deepseek-v4.1-fallback
     tokenizer_model: DeepSeek-V4.1-Flash
     mode: auto
     normal: {enabled: true, max_uncached_tokens: 4096, fallback_to_pd: true}
 
-  # normal on unified workers, session affinity, one broken worker.
+  # normal on unified instances, session affinity, one broken instance.
   - name: deepseek-v4.1-normal
     tokenizer_model: DeepSeek-V4.1-Flash
     mode: normal
@@ -111,9 +89,12 @@ models:
     pd: {handshake: push}
     normal: {enabled: true, max_uncached_tokens: 512, fallback_to_pd: true}
 
-  # Qwen3-VL over SGLang: media collapse to the model's placeholders and go
-  # raw as image_data / video_data.
-  - name: qwen3-vl-sglang
-    tokenizer_model: Qwen3-VL-8B-Instruct
-    engine_protocol: sglang
+  # No instances in the stack: engines outside it register their own through
+  # the mwip Registry (the e2e suite's engine written against the proto,
+  # examples/python-engine).
+  - name: external-engine
+    tokenizer_model: Qwen3-8B
     mode: normal
+    routing:
+      unified: {policy: round_robin}
+    retry: {stage_attempts: 3}

@@ -71,8 +71,8 @@ func (r *Registry) rebuildLocked() {
 // Upsert adds a worker or updates its spec. It returns the worker and
 // whether it was newly added.
 func (r *Registry) Upsert(spec Spec, source string) (*Worker, bool, error) {
-	if spec.ID == "" || spec.Model == "" || spec.URL == "" {
-		return nil, false, fmt.Errorf("worker spec needs id, model and url: %+v", spec)
+	if spec.ID == "" || spec.Model == "" || spec.Target == "" {
+		return nil, false, fmt.Errorf("worker spec needs id, model and target: %+v", spec)
 	}
 	if _, err := ParseRole(string(spec.Role)); err != nil {
 		return nil, false, err
@@ -90,9 +90,11 @@ func (r *Registry) Upsert(spec Spec, source string) (*Worker, bool, error) {
 		if old.Model != spec.Model || old.Role != spec.Role {
 			r.rebuildLocked()
 		}
-		r.mu.Unlock()
+		// Refreshed under the registry lock, so Sweep cannot expire it in
+		// between.
 		w.Touch(now)
-		if old.URL != spec.URL || old.Role != spec.Role || old.Model != spec.Model {
+		r.mu.Unlock()
+		if old.Target != spec.Target || old.Role != spec.Role || old.Model != spec.Model {
 			r.emit(Event{Kind: "updated", Worker: w})
 		}
 		return w, false, nil
@@ -107,8 +109,8 @@ func (r *Registry) Upsert(spec Spec, source string) (*Worker, bool, error) {
 	return w, true, nil
 }
 
-// Remove deletes a worker.
-func (r *Registry) Remove(id string) bool {
+// Remove deletes a worker and returns its spec.
+func (r *Registry) Remove(id string) (Spec, bool) {
 	r.mu.Lock()
 	w, ok := r.workers[id]
 	if ok {
@@ -116,10 +118,11 @@ func (r *Registry) Remove(id string) bool {
 		r.rebuildLocked()
 	}
 	r.mu.Unlock()
-	if ok {
-		r.emit(Event{Kind: "removed", Worker: w})
+	if !ok {
+		return Spec{}, false
 	}
-	return ok
+	r.emit(Event{Kind: "removed", Worker: w})
+	return w.Spec(), true
 }
 
 // Get returns a worker by ID.
@@ -150,27 +153,30 @@ func (r *Registry) All() []*Worker {
 }
 
 // Sweep removes heartbeat-registered workers whose last heartbeat is older
-// than the TTL. It returns the removed IDs.
-func (r *Registry) Sweep() []string {
+// than the TTL, and returns their specs by ID. Static workers never expire.
+func (r *Registry) Sweep() []Spec {
 	now := r.now()
-	var expired []string
-	r.mu.RLock()
+	var expired []*Worker
+	r.mu.Lock()
 	for id, w := range r.workers {
-		if w.Source != "heartbeat" {
-			continue
-		}
-		w.mu.Lock()
-		last := w.lastSeen
-		w.mu.Unlock()
-		if now.Sub(last) > r.ttl {
-			expired = append(expired, id)
+		// Checked under the registry lock: a heartbeat that refreshed the
+		// worker since cannot be lost.
+		if w.Source == "heartbeat" && now.Sub(w.LastSeen()) > r.ttl {
+			delete(r.workers, id)
+			expired = append(expired, w)
 		}
 	}
-	r.mu.RUnlock()
-	for _, id := range expired {
-		r.Remove(id)
+	if len(expired) > 0 {
+		r.rebuildLocked()
 	}
-	return expired
+	r.mu.Unlock()
+	specs := make([]Spec, 0, len(expired))
+	for _, w := range expired {
+		specs = append(specs, w.Spec())
+		r.emit(Event{Kind: "removed", Worker: w})
+	}
+	sort.Slice(specs, func(i, j int) bool { return specs[i].ID < specs[j].ID })
+	return specs
 }
 
 // TTL returns the heartbeat TTL.

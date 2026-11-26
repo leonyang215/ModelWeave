@@ -1,0 +1,280 @@
+// ModelWeave Inference Protocol (mwip), version 1: shared types.
+//
+// mwip is the protocol between the ModelWeave gateway and inference engines.
+// The gateway turns every API request (OpenAI Chat Completions / Responses,
+// Anthropic Messages) into the intermediate state defined in this file: the
+// conversation rendered into one token list by the model's prompt format,
+// with images and videos already planned and expanded, and the options the
+// engine needs to generate and to parse its own output.
+//
+//   engine.proto    the Engine service inference engines implement
+//   registry.proto  the Registry service the gateway implements, where
+//                   engine instances register
+//
+// Engines integrate with ModelWeave only through mwip.
+//
+// Field names follow the JSON the ModelWeave tokenizer returns for the
+// intermediate state (docs/protocol.md), so the two read the same.
+syntax = "proto3";
+
+package modelweave.mwip.v1;
+
+import "google/protobuf/struct.proto";
+
+option go_package = "github.com/leonyang215/ModelWeave/api/mwip/v1;mwipv1";
+
+// Role is the job of an engine instance in a disaggregated deployment.
+enum Role {
+  ROLE_UNSPECIFIED = 0;
+  // Builds the embeddings of images and video frames (Engine.Encode).
+  ROLE_ENCODE = 1;
+  // Runs the prefill leg of split requests and hands the KV cache to a
+  // decode instance.
+  ROLE_PREFILL = 2;
+  // Runs the decode leg of split requests; with Instance.normal it also runs
+  // whole requests.
+  ROLE_DECODE = 3;
+  // Runs whole requests (prefill and decode on one instance).
+  ROLE_UNIFIED = 4;
+}
+
+// Modality of a media item or of a placement.
+enum Modality {
+  MODALITY_UNSPECIFIED = 0;
+  MODALITY_IMAGE = 1;
+  MODALITY_VIDEO = 2;
+  // One kept frame of a video (Placement.modality).
+  MODALITY_FRAME = 3;
+}
+
+// Span is a range of positions of the token list.
+message Span {
+  int32 offset = 1;
+  int32 length = 2;
+}
+
+// MediaSource locates the bytes of a media item. The gateway never fetches
+// media: engines that encode read the source themselves.
+message MediaSource {
+  // "url" (remote) or "base64" (a data URL in url).
+  string kind = 1;
+  string url = 2;
+  string mime = 3;
+}
+
+// MediaMetadata holds the properties the caller measured.
+message MediaMetadata {
+  int32 width = 1;
+  int32 height = 2;
+  int64 duration_ms = 3;
+  optional int64 total_frames = 4;
+  double video_fps = 5;
+}
+
+// PixelControlOptions cap one image or one video frame.
+message PixelControlOptions {
+  optional int32 max_long_side = 1;
+  optional int64 max_total_pixels = 2;
+}
+
+// FrameExtractOptions control the frame sampling of a video.
+message FrameExtractOptions {
+  optional double fps = 1;
+  optional int32 nframes = 2;
+  PixelControlOptions pixel_control_options = 3;
+}
+
+// MediaPlan is the resize and token plan of a media item, computed by the
+// model's own processor rules.
+message MediaPlan {
+  int32 width = 1;
+  int32 height = 2;
+  // Positions of an image, or of each kept frame of a video.
+  int32 tokens = 3;
+  int32 nframes = 4;
+  int32 kept_frames = 5;
+  // Seconds of the kept frames (or temporal patches).
+  repeated double timestamps = 6;
+}
+
+// Placement is the token range of one image or one kept video frame. Every
+// position of the range holds pad_value.
+message Placement {
+  int32 offset = 1;
+  int32 length = 2;
+  // 2^30 + (BE_u64(sha256(reference)[0..8]) & (2^30 - 1)): equal media give
+  // equal tokens, so prefix caches cover them, and no pad value collides
+  // with a vocabulary token.
+  uint32 pad_value = 3;
+  // The image digest, or "{video digest}_kf_{k:04}" for kept frame k.
+  string reference = 4;
+  // MODALITY_IMAGE or MODALITY_FRAME.
+  Modality modality = 5;
+  // Seconds into the video, for frames.
+  optional double timestamp = 6;
+}
+
+// EmbeddingArtifact is the encoder output of one placement.
+message EmbeddingArtifact {
+  // The placement's reference.
+  string reference = 1;
+  // Where the embedding is, in a scheme the engines agree on.
+  string uri = 2;
+  int32 tokens = 3;
+  // Instance id of the encoder that built it.
+  string encoder = 4;
+}
+
+// MediaItem is one image or video of the prompt.
+message MediaItem {
+  // Order of the item in the request.
+  int32 index = 1;
+  // MODALITY_IMAGE or MODALITY_VIDEO.
+  Modality modality = 2;
+  // sha256 hex of the media bytes.
+  string digest = 3;
+  MediaSource source = 4;
+  // "low", "high" or empty.
+  string detail = 5;
+  MediaMetadata metadata = 6;
+  PixelControlOptions pixel_control_options = 7;
+  FrameExtractOptions frame_extract_options = 8;
+  MediaPlan plan = 9;
+  // The whole range of the item; a video's includes its timestamp text.
+  Span span = 10;
+  // One per image, one per kept frame of a video.
+  repeated Placement placements = 11;
+  // The model's placeholder of the item in its prompt format, for engines
+  // that expand media themselves; empty when the model has none for the
+  // modality.
+  repeated uint32 placeholder = 12;
+  // Set by the gateway after the encode stage: one per placement, in
+  // placement order. Without them the engine encodes the item itself.
+  repeated EmbeddingArtifact embedding_artifacts = 13;
+}
+
+// Multimodal lists the images and videos of a prompt.
+message Multimodal {
+  // Every pad value is at least pad_shift (2^30).
+  uint32 pad_shift = 1;
+  // The model token one unexpanded image takes in the prompt format.
+  uint32 placeholder_token_id = 2;
+  repeated MediaItem items = 3;
+}
+
+// FunctionDefinition is an OpenAI function definition.
+message FunctionDefinition {
+  string name = 1;
+  string description = 2;
+  // JSON schema of the arguments.
+  google.protobuf.Struct parameters = 3;
+  optional bool strict = 4;
+}
+
+// Tool is an OpenAI function tool offered to the model.
+message Tool {
+  // Always "function".
+  string type = 1;
+  FunctionDefinition function = 2;
+}
+
+// Conversation is what engine-side parsers need of the conversation; its
+// messages are already rendered into the token list.
+message Conversation {
+  bool thinking_mode = 1;
+  // "low", "medium", "high", ... as the model's prompt format knows them.
+  string reasoning_effort = 2;
+  repeated Tool tools = 3;
+  // "auto", "none" or "required" (a named tool choice is narrowed to its
+  // tool and "required").
+  string tool_choice = 4;
+  // "text", "json_object", "json_schema" or "regex".
+  string response_format = 5;
+  // The chat template variables the prompt was rendered with (thinking
+  // switches such as Qwen's enable_thinking), for parsers that read them.
+  google.protobuf.Struct chat_template_kwargs = 6;
+}
+
+// ConstraintKind is the kind of an output constraint.
+enum ConstraintKind {
+  CONSTRAINT_KIND_UNSPECIFIED = 0;
+  // JSON output; schema is a JSON schema, or empty for any JSON object.
+  CONSTRAINT_KIND_JSON = 1;
+  // Output matching the regular expression in schema.
+  CONSTRAINT_KIND_REGEX = 2;
+  // Tool calls may follow; schema lists the tools.
+  CONSTRAINT_KIND_TOOL_CALL = 3;
+  // A tool call must follow; schema lists the tools.
+  CONSTRAINT_KIND_TOOL_CALL_REQUIRED = 4;
+}
+
+// OutputConstraint is a constraint an engine may enforce by constrained
+// decoding.
+message OutputConstraint {
+  ConstraintKind kind = 1;
+  string schema = 2;
+}
+
+// InferenceOptions are the sampling options of a request; max_tokens is
+// resolved against the context window.
+message InferenceOptions {
+  int32 max_tokens = 1;
+  optional double temperature = 2;
+  optional double top_p = 3;
+  optional int32 top_k = 4;
+  optional double min_p = 5;
+  optional double presence_penalty = 6;
+  optional double frequency_penalty = 7;
+  optional double repetition_penalty = 8;
+  optional uint64 seed = 9;
+  bool logprobs = 10;
+  optional int32 top_logprobs = 11;
+  // The model's stop tokens.
+  repeated uint32 stop_token_ids = 12;
+  OutputConstraint output_constraint = 13;
+}
+
+// ThinkingStage is where the output starts relative to the reasoning.
+enum ThinkingStage {
+  // No reasoning: the output starts as content.
+  THINKING_STAGE_UNSPECIFIED = 0;
+  // The prompt opened the reasoning (or the model opens it itself).
+  THINKING_STAGE_REASONING_START = 1;
+  // A prefilled assistant turn left the reasoning open.
+  THINKING_STAGE_REASONING_CONTINUATION = 2;
+  // A prefilled assistant turn continues its content.
+  THINKING_STAGE_CONTENT_CONTINUATION = 3;
+}
+
+// ParsingOptions tell the engine how to parse its own output.
+message ParsingOptions {
+  // Markup of the reasoning: "deepseek_v4" (ends at </think>), "qwen3"
+  // (<think>...</think>, the model may open it itself); empty: none.
+  string reasoning_parser = 1;
+  // Markup of tool calls: "deepseek_v4" (DSML), "hermes"
+  // (<tool_call>{"name": ..., "arguments": ...}</tool_call>); empty: none.
+  string tool_call_parser = 2;
+  bool parse_tool_calls = 3;
+  // The prompt already opened the tool-call block.
+  bool starts_in_tool_calls = 4;
+  bool parse_json_output = 5;
+  ThinkingStage thinking_initial_stage = 6;
+  // Stop strings the engine applies itself (the stop string is not output).
+  repeated string stop_sequences = 7;
+}
+
+// EngineState is the load of an engine instance. Zero means unknown.
+message EngineState {
+  int32 running_requests = 1;
+  int32 waiting_requests = 2;
+  int64 kv_used_tokens = 3;
+  int64 kv_capacity_tokens = 4;
+  // 0..1, when token counts are not known.
+  double kv_usage = 5;
+  int64 prefill_queue_tokens = 6;
+  int32 max_running_requests = 7;
+  double decode_tokens_per_sec = 8;
+  double prefill_tokens_per_sec = 9;
+  int64 cached_blocks = 10;
+  bool draining = 11;
+}

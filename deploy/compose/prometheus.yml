@@ -15,14 +15,8 @@ scrape_configs:
           - prefill-1:9000
           - decode-0:9000
           - decode-1:9000
-          - ev-0:9000
-          - pv-0:9000
-          - dv-0:9000
           - pp-0:9000
           - dp-0:9000
-          - ps-0:9000
-          - ds-0:9000
-          - es-0:9000
           - pf-0:9000
           - df-0:9000
           - normal-0:9000
@@ -34,4 +28,3 @@ scrape_configs:
           - qvl-enc-0:9000
           - qvl-p0:9000
           - qvl-d0:9000
-          - qvl-sg-0:9000

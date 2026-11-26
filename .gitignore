@@ -3,3 +3,5 @@ tmp/
 tokenizer/target/
 *.log
 deploy/compose/data/
+examples/python-engine/gen/
+__pycache__/

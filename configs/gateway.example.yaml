@@ -12,22 +12,17 @@ server:
   idle_timeout: 120s                # max gap between output events once streaming
   expose_routing_headers: true      # X-ModelWeave-Mode / -Decode-Worker / -Prefill-Worker ...
   shutdown_grace: 30s
-  control_token: ""                 # if set, /mwip/v1/* and /admin/* require X-ModelWeave-Token
+  grpc_listen: ":8081"              # mwip Registry (gRPC): engine instances register here
+  control_token: ""                 # if set, Registry calls need x-modelweave-token metadata and
+                                    # /admin/* the X-ModelWeave-Token header
 
 tokenizer:
   endpoints: ["http://tokenizer:8090"]   # round-robin; each request pins one replica
   timeout: 30s                           # render timeout
 
-# How the gateway calls inference workers with the tokenizer's intermediate
-# state (token list + media placements, docs/protocol.md). The gateway flag
-# -engine-protocol (env MW_ENGINE_PROTOCOL) overrides it; a model's
-# engine_protocol overrides both.
-engine:
-  protocol: mwip                    # mwip: send the intermediate state as is (POST /mwip/v1/generate)
-                                    # vllm: adapt to POST /inference/v1/generate (token in, derender out,
-                                    #       kv_transfer_params / ec_transfer_params for PD / EPD)
-                                    # sglang: adapt to POST /generate (input_ids + image_data,
-                                    #       bootstrap_* for PD; SGLang encodes media itself)
+# Engines integrate through mwip only: every instance serves the gRPC service
+# modelweave.mwip.v1.Engine (proto/modelweave/mwip/v1, docs/mwip.md) and
+# receives the tokenizer's intermediate state as is.
 
 auth:
   enabled: false                    # true: unknown or missing API keys get 401
@@ -43,25 +38,25 @@ tenants:
     tpm: 2000000                    # prompt+completion tokens per minute (0 = unlimited)
     max_concurrency: 128
 
+# Every instance serves one model in one role. Instances register themselves
+# with heartbeats on the mwip Registry (server.grpc_listen), or are listed
+# here; target is the instance's mwip target (host:port of its Engine service,
+# "https://host:port" for TLS).
 discovery:
-  heartbeat_ttl: 15s                # workers registered by heartbeat expire after this
-  workers: []                       # static workers (role: encode | prefill | decode | unified), e.g.
-  # - {id: e0, model: deepseek-v4.1, role: encode, url: "http://10.0.0.4:8000"}
-  # - {id: p0, model: deepseek-v4.1, role: prefill, url: "http://10.0.0.5:8000",
-  #    bootstrap_addr: "http://10.0.0.5:8998", engine_id: "p0-engine"}   # bootstrap handshake
-  # - {id: d0, model: deepseek-v4.1, role: decode, url: "http://10.0.0.6:8000", normal: true,
-  #    kv_capacity_tokens: 1048576, max_running_requests: 256}         # also runs normal requests
-  # - {id: u0, model: deepseek-v4.1, role: unified, url: "http://10.0.0.7:30000"}
+  heartbeat_ttl: 15s                # instances registered by heartbeat expire when none arrives for this
+  workers: []                       # static instances (role: encode | prefill | decode | unified), e.g.
+  # - {id: e0, model: deepseek-v4.1, role: encode, target: "10.0.0.4:9001"}
+  # - {id: p0, model: deepseek-v4.1, role: prefill, target: "10.0.0.5:9001",
+  #    bootstrap_addr: "10.0.0.5:8998", engine_id: "p0-engine"}           # bootstrap handshake
+  # - {id: d0, model: deepseek-v4.1, role: decode, target: "10.0.0.6:9001", normal: true,
+  #    kv_capacity_tokens: 1048576, max_running_requests: 256}          # also runs normal requests
 
 engine_state:
   stale_after: 10s                  # ignore engine state older than this
-  poll:                             # pull-based state (in addition to heartbeats)
+  poll:                             # Engine.GetState of every instance (static ones send no heartbeats)
     enabled: false
     interval: 2s
     timeout: 1s
-    format: mwip                    # mwip (GET /mwip/v1/state) | prometheus (GET /metrics)
-    preset: vllm                    # prometheus metric mapping: vllm | sglang | modelweave
-    metrics: {}                     # per-field overrides, e.g. {running_requests: "my_engine:running"}
 
 health:
   failure_threshold: 3              # consecutive transport failures before ejection
@@ -82,17 +77,14 @@ models:
   - name: deepseek-v4.1
     aliases: ["DeepSeek-V4.1-Flash", "deepseek-flash"]
     tokenizer_model: DeepSeek-V4.1-Flash   # model name the tokenizer knows
-    engine_model: ""                # served model name sent to engines (vLLM checks it); empty: omitted
-    engine_protocol: ""             # mwip | vllm | sglang; empty: engine.protocol
+    engine_model: ""                # model name sent to engines in GenerateRequest.model; empty: omitted
     context_length: 0               # 0: the model's window in the tokenizer; set lower to cap it
     # auto: normal or pd per request (normal on unified workers, or on decode
     # workers with normal: true); or force normal | pd.
     mode: auto
     pd:
-      handshake: ""                 # push (D registers, P pushes KV; mwip, vLLM extension) | bootstrap
-                                    # (SGLang bootstrap_*, vLLM MooncakeConnector; required for sglang)
-                                    # | pull (P returns a KV handle / vLLM NixlConnector params)
-                                    # empty: push for mwip, bootstrap for vllm and sglang
+      handshake: push               # push (D registers, P pushes KV) | bootstrap (D fetches from P's
+                                    # bootstrap_addr) | pull (P returns a KV handle, D pulls)
     normal:                         # normal = no PD split: a decode worker runs prefill itself
       enabled: true
       max_uncached_tokens: 1024     # run normal when the decode worker computes at most this many tokens
@@ -100,8 +92,7 @@ models:
       session_affinity: true        # follow-up turns run normal on the session's decode worker
       session_ttl: 30m
       fallback_to_pd: true          # a failed normal attempt retries as pd (once, before output)
-    encode:                         # E stage: mwip embedding artifacts, vLLM EC producer (ec_transfer_params);
-                                    # sglang encodes inside the engine (--encoder-urls), no gateway E stage
+    encode:                         # E stage: embedding artifacts built by encode instances (Engine.Encode)
       policy: auto                  # auto (E stage when encoders exist) | always | never
       artifact_cache_ttl: 1h        # content-addressed embedding artifacts
       artifact_cache_max: 10000

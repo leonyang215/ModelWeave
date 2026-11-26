@@ -46,12 +46,15 @@ var (
 	client    = &http.Client{Timeout: 60 * time.Second}
 )
 
-// workerStats returns a mock worker's counters, including the body of the
-// last generate call it received.
+// instanceURL is the HTTP base of a mock instance (one per container).
+func instanceURL(id string) string { return fmt.Sprintf(workerFmt, id) }
+
+// workerStats returns a mock instance's counters, including the last
+// Generate request it received (in its JSON form, with proto field names).
 func workerStats(t *testing.T, id string) map[string]any {
 	t.Helper()
 	var m map[string]any
-	if err := json.Unmarshal(get(t, fmt.Sprintf(workerFmt, id)+"/mock/stats"), &m); err != nil {
+	if err := json.Unmarshal(get(t, instanceURL(id)+"/mock/stats"), &m); err != nil {
 		t.Fatal(err)
 	}
 	return m
@@ -210,13 +213,18 @@ func metric(t *testing.T, base, name string, labels ...string) float64 {
 }
 
 type worker struct {
-	ID       string         `json:"id"`
-	Model    string         `json:"model"`
-	Role     string         `json:"role"`
-	Protocol string         `json:"protocol"`
-	Normal   bool           `json:"normal"`
-	Healthy  bool           `json:"healthy"`
-	State    map[string]any `json:"state"`
+	ID             string         `json:"id"`
+	Model          string         `json:"model"`
+	Role           string         `json:"role"`
+	Target         string         `json:"target"` // the instance's mwip target
+	Source         string         `json:"source"`
+	Normal         bool           `json:"normal"`
+	Healthy        bool           `json:"healthy"`
+	Draining       bool           `json:"draining"`
+	AdminDrained   bool           `json:"admin_drained"`
+	HeartbeatAgeMS int64          `json:"heartbeat_age_ms"`
+	IndexBlocks    int            `json:"index_blocks"`
+	State          map[string]any `json:"state"`
 }
 
 func workers(t *testing.T, base string) map[string]worker {

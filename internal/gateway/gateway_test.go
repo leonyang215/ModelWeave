@@ -5,9 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/leonyang215/ModelWeave/internal/config"
@@ -60,42 +58,5 @@ func TestErrorShapes(t *testing.T) {
 		if body["error"].(map[string]any)["type"] != tc.kind {
 			t.Fatalf("openai shape: %s", rec.Body)
 		}
-	}
-}
-
-func TestHeartbeatRegistersWorkerAndControlToken(t *testing.T) {
-	s := newTestServer(t, "server: {control_token: secret}\n")
-	h := s.Handler()
-	hb := `{"worker":{"id":"w1","model":"m-alias","role":"decode","url":"http://w1:9000","normal":true},
-	        "state":{"running_requests":2,"kv_capacity_tokens":1000,"kv_used_tokens":100}}`
-	req := httptest.NewRequest(http.MethodPost, "/mwip/v1/heartbeat", strings.NewReader(hb))
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("heartbeat without token: %d", rec.Code)
-	}
-	req = httptest.NewRequest(http.MethodPost, "/mwip/v1/heartbeat", strings.NewReader(hb))
-	req.Header.Set("X-ModelWeave-Token", "secret")
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("heartbeat: %d %s", rec.Code, rec.Body)
-	}
-	w := s.reg.Get("w1")
-	if w == nil || w.Spec().Model != "m" || !w.Spec().ServesNormal() {
-		t.Fatalf("worker not registered under the canonical model: %+v", w)
-	}
-	req = httptest.NewRequest(http.MethodPost, "/mwip/v1/heartbeat", strings.NewReader(`{"worker":{"id":"x","model":"nope","role":"decode","url":"u"}}`))
-	req.Header.Set("X-ModelWeave-Token", "secret")
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("unknown model accepted: %d", rec.Code)
-	}
-	// The API itself does not need the control token.
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "m-alias") {
-		t.Fatalf("models: %d %s", rec.Code, rec.Body)
 	}
 }

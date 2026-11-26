@@ -6,23 +6,23 @@
 #   docker compose -f deploy/compose/docker-compose.yaml --profile test run --rm e2e
 #   docker compose -f deploy/compose/docker-compose.yaml --profile monitoring up -d prometheus
 #
-# Topology (see gateway.yaml). Every mock worker serves all three engine
-# protocols and generates in its model's markup; the gateway decides which
-# protocol it speaks (engine.protocol, the -engine-protocol startup option, or
-# a model's engine_protocol):
-#   deepseek-v4.1          mwip, auto normal/pd + EPD, push:  enc-0, prefill-0/1, decode-0/1
-#                          (gateway-events: the same workers over vllm, pull)
-#   deepseek-v4.1-vllm     vllm, auto normal/pd + EPD (EC producer), bootstrap: ev-0, pv-0, dv-0
-#   deepseek-v4.1-pull     mwip, pd, pull handshake:          pp-0 -> dp-0
-#   deepseek-v4.1-sglang   sglang, pd, bootstrap; engine-managed encoding: ps-0 -> ds-0 (es-0 unused)
+# Topology (see gateway.yaml). Every mock engine is one instance, one model
+# in one role: it implements the mwip Engine service (gRPC :9001), generates
+# in its model's markup, and registers with the gateways' mwip Registry
+# (gRPC :8081) by heartbeat; its HTTP port (:9000) carries the mocks' KV
+# hand-off, metrics, counters and registration controls.
+#   deepseek-v4.1          auto normal/pd + EPD, push:        enc-0, prefill-0/1, decode-0/1
+#                          (gateway-events: the same instances, pull)
+#   deepseek-v4.1-pull     pd, pull handshake:                pp-0 -> dp-0
 #   deepseek-v4.1-fallback normal rejected -> pd:             pf-0, df-0
-#   deepseek-v4.1-normal   normal on unified workers + session affinity + a broken worker: normal-0/1, normal-bad
-#   deepseek-v4.1-tiny     one slot, admission queue, static worker polled via /metrics
-#   qwen3                  Qwen3-8B, mwip, auto normal/pd, push:     qwen-p0 -> qwen-d0
-#                          (gateway-events: the same workers over vllm, pull)
-#   qwen3-vl               Qwen3-VL, mwip, auto + EPD (images, videos): qvl-enc-0, qvl-p0, qvl-d0
-#                          (gateway-events: vllm with an EC producer, videos as video_url)
-#   qwen3-vl-sglang        Qwen3-VL over sglang, normal: qvl-sg-0 (image_data / video_data)
+#   deepseek-v4.1-normal   normal on unified instances + session affinity + a broken one: normal-0/1, normal-bad
+#   deepseek-v4.1-tiny     one slot, admission queue: tiny-0, static (no heartbeats), polled with Engine.GetState
+#   qwen3                  Qwen3-8B, auto normal/pd, push:    qwen-p0 -> qwen-d0
+#                          (gateway-events: the same instances, pull)
+#   qwen3-vl               Qwen3-VL, auto + EPD (images, videos): qvl-enc-0, qvl-p0, qvl-d0
+#                          (gateway-events: the same instances, pull)
+#   external-engine        no instances in the stack: engines outside it (the e2e
+#                          suite's, examples/python-engine) register their own
 name: modelweave
 
 x-build: &build
@@ -41,14 +41,15 @@ x-mock: &mock
     MOCK_CONTROL_TOKEN: ${MW_CONTROL_TOKEN:-local-control-token}
     MOCK_TOKENIZER_URL: http://tokenizer:8090
     MOCK_TOKENIZER_MODEL: DeepSeek-V4.1-Flash
-    MOCK_GATEWAY_URL: http://gateway:8080
+    MOCK_GRPC_LISTEN: ":9001"
+    MOCK_REGISTRY: gateway:8081
     MOCK_BLOCK_SIZE: "64"
     MOCK_PREFILL_TPS: "20000"
     MOCK_DECODE_TPS: "400"
     MOCK_KV_CAPACITY_TOKENS: "262144"
     MOCK_MAX_RUNNING: "32"
   healthcheck:
-    test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/mwip/v1/health"]
+    test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/health"]
     interval: 2s
     timeout: 2s
     retries: 30
@@ -75,7 +76,9 @@ services:
     volumes: ["./gateway.yaml:/etc/modelweave/gateway.yaml:ro"]
     environment:
       MW_CONTROL_TOKEN: ${MW_CONTROL_TOKEN:-local-control-token}
-    ports: ["${MW_GATEWAY_PORT:-38080}:8080"]
+    # 8080: the API and admin; 8081: the mwip Registry (engines outside the
+    # stack, such as examples/python-engine, register through :38082).
+    ports: ["${MW_GATEWAY_PORT:-38080}:8080", "${MW_GATEWAY_GRPC_PORT:-38082}:8081"]
     depends_on:
       tokenizer: {condition: service_healthy}
     healthcheck:
@@ -84,14 +87,14 @@ services:
       timeout: 2s
       retries: 30
 
-  # A second gateway replica sharing the deepseek-v4.1 workers. Its prefix
-  # index is fed only by engine KV events (kv_index.type=events).
-  # Started with -engine-protocol vllm: the startup option selects the
-  # engine protocol of every model without its own engine_protocol.
+  # A second gateway replica sharing the deepseek-v4.1, qwen3 and qwen3-vl
+  # instances, which register with both. Its prefix index is fed only by
+  # engine KV events (kv_index.type=events), and it runs PD with the pull
+  # handshake.
   gateway-events:
     image: modelweave/gateway:dev
     restart: unless-stopped
-    command: ["-config", "/etc/modelweave/gateway.yaml", "-engine-protocol", "vllm"]
+    command: ["-config", "/etc/modelweave/gateway.yaml"]
     volumes: ["./gateway-events.yaml:/etc/modelweave/gateway.yaml:ro"]
     ports: ["${MW_GATEWAY_EVENTS_PORT:-38081}:8080"]
     depends_on:
@@ -120,7 +123,7 @@ services:
       MOCK_ID: prefill-0
       MOCK_ROLE: prefill
       MOCK_ADVERTISE_URL: http://prefill-0:9000
-      MOCK_GATEWAY_URL: http://gateway:8080,http://gateway-events:8080
+      MOCK_REGISTRY: gateway:8081,gateway-events:8081
       MOCK_KV_EVENTS: "true"
   prefill-1:
     <<: *mock
@@ -129,7 +132,7 @@ services:
       MOCK_ID: prefill-1
       MOCK_ROLE: prefill
       MOCK_ADVERTISE_URL: http://prefill-1:9000
-      MOCK_GATEWAY_URL: http://gateway:8080,http://gateway-events:8080
+      MOCK_REGISTRY: gateway:8081,gateway-events:8081
       MOCK_KV_EVENTS: "true"
   decode-0:
     <<: *mock
@@ -139,7 +142,7 @@ services:
       MOCK_ROLE: decode
       MOCK_NORMAL: "true"
       MOCK_ADVERTISE_URL: http://decode-0:9000
-      MOCK_GATEWAY_URL: http://gateway:8080,http://gateway-events:8080
+      MOCK_REGISTRY: gateway:8081,gateway-events:8081
       MOCK_KV_EVENTS: "true"
   decode-1:
     <<: *mock
@@ -149,19 +152,8 @@ services:
       MOCK_ROLE: decode
       MOCK_NORMAL: "true"
       MOCK_ADVERTISE_URL: http://decode-1:9000
-      MOCK_GATEWAY_URL: http://gateway:8080,http://gateway-events:8080
+      MOCK_REGISTRY: gateway:8081,gateway-events:8081
       MOCK_KV_EVENTS: "true"
-
-  # ---- deepseek-v4.1-vllm: the vLLM adapter, EPD + PD + normal ------------
-  ev-0:
-    <<: *mock
-    environment: {<<: *mock-env, MOCK_ID: ev-0, MOCK_ROLE: encode, MOCK_MODEL: deepseek-v4.1-vllm, MOCK_ADVERTISE_URL: "http://ev-0:9000", MOCK_ENCODE_LATENCY: 40ms}
-  pv-0:
-    <<: *mock
-    environment: {<<: *mock-env, MOCK_ID: pv-0, MOCK_ROLE: prefill, MOCK_MODEL: deepseek-v4.1-vllm, MOCK_ADVERTISE_URL: "http://pv-0:9000"}
-  dv-0:
-    <<: *mock
-    environment: {<<: *mock-env, MOCK_ID: dv-0, MOCK_ROLE: decode, MOCK_NORMAL: "true", MOCK_MODEL: deepseek-v4.1-vllm, MOCK_ADVERTISE_URL: "http://dv-0:9000"}
 
   # ---- deepseek-v4.1-pull: mwip pull handshake -----------------------------
   pp-0:
@@ -171,19 +163,6 @@ services:
     <<: *mock
     environment: {<<: *mock-env, MOCK_ID: dp-0, MOCK_ROLE: decode, MOCK_MODEL: deepseek-v4.1-pull, MOCK_ADVERTISE_URL: "http://dp-0:9000"}
 
-  # ---- deepseek-v4.1-sglang: the SGLang adapter ----------------------------
-  ps-0:
-    <<: *mock
-    environment: {<<: *mock-env, MOCK_ID: ps-0, MOCK_ROLE: prefill, MOCK_MODEL: deepseek-v4.1-sglang, MOCK_ADVERTISE_URL: "http://ps-0:9000"}
-  ds-0:
-    <<: *mock
-    environment: {<<: *mock-env, MOCK_ID: ds-0, MOCK_ROLE: decode, MOCK_MODEL: deepseek-v4.1-sglang, MOCK_ADVERTISE_URL: "http://ds-0:9000"}
-  # Registered, but SGLang encodes inside the engine: the gateway never
-  # calls it (e2e checks that).
-  es-0:
-    <<: *mock
-    environment: {<<: *mock-env, MOCK_ID: es-0, MOCK_ROLE: encode, MOCK_MODEL: deepseek-v4.1-sglang, MOCK_ADVERTISE_URL: "http://es-0:9000"}
-
   # ---- deepseek-v4.1-fallback: decode worker declines normal requests ------
   pf-0:
     <<: *mock
@@ -192,7 +171,7 @@ services:
     <<: *mock
     environment: {<<: *mock-env, MOCK_ID: df-0, MOCK_ROLE: decode, MOCK_MODEL: deepseek-v4.1-fallback, MOCK_NORMAL: "true", MOCK_REJECT_NORMAL: "true", MOCK_ADVERTISE_URL: "http://df-0:9000"}
 
-  # ---- deepseek-v4.1-normal: unified workers, one of them broken -----------
+  # ---- deepseek-v4.1-normal: unified instances, one of them broken ---------
   normal-0:
     <<: *mock
     environment: {<<: *mock-env, MOCK_ID: normal-0, MOCK_ROLE: unified, MOCK_MODEL: deepseek-v4.1-normal, MOCK_ADVERTISE_URL: "http://normal-0:9000"}
@@ -203,7 +182,7 @@ services:
     <<: *mock
     environment: {<<: *mock-env, MOCK_ID: normal-bad, MOCK_ROLE: unified, MOCK_MODEL: deepseek-v4.1-normal, MOCK_FAIL_RATE: "1", MOCK_ADVERTISE_URL: "http://normal-bad:9000"}
 
-  # ---- deepseek-v4.1-tiny: static worker with a single slot ----------------
+  # ---- deepseek-v4.1-tiny: static instance with a single slot --------------
   tiny-0:
     <<: *mock
     environment:
@@ -212,7 +191,7 @@ services:
       MOCK_ROLE: unified
       MOCK_MODEL: deepseek-v4.1-tiny
       MOCK_ADVERTISE_URL: http://tiny-0:9000
-      MOCK_GATEWAY_URL: ""          # registered statically in gateway.yaml
+      MOCK_REGISTRY: ""             # listed in gateway.yaml: no heartbeats
       MOCK_MAX_RUNNING: "1"
       MOCK_DECODE_TPS: "40"
       MOCK_ANSWER_REPEAT: "1"
@@ -227,7 +206,7 @@ services:
       MOCK_MODEL: qwen3
       MOCK_TOKENIZER_MODEL: Qwen3-8B
       MOCK_ADVERTISE_URL: http://qwen-p0:9000
-      MOCK_GATEWAY_URL: http://gateway:8080,http://gateway-events:8080
+      MOCK_REGISTRY: gateway:8081,gateway-events:8081
       MOCK_KV_EVENTS: "true"
   qwen-d0:
     <<: *mock
@@ -248,7 +227,7 @@ services:
       MOCK_MODEL: qwen3-vl
       MOCK_TOKENIZER_MODEL: Qwen3-VL-8B-Instruct
       MOCK_ADVERTISE_URL: http://qvl-enc-0:9000
-      MOCK_GATEWAY_URL: http://gateway:8080,http://gateway-events:8080
+      MOCK_REGISTRY: gateway:8081,gateway-events:8081
       MOCK_ENCODE_LATENCY: 40ms
   qvl-p0:
     <<: *mock
@@ -266,12 +245,6 @@ services:
       MOCK_NORMAL: "true"
       MOCK_ADVERTISE_URL: http://qvl-d0:9000
 
-  # ---- qwen3-vl-sglang: Qwen3-VL over SGLang's /generate ---------------------
-  qvl-sg-0:
-    <<: *mock
-    environment: {<<: *mock-env, MOCK_ID: qvl-sg-0, MOCK_ROLE: unified, MOCK_MODEL: qwen3-vl-sglang,
-                  MOCK_TOKENIZER_MODEL: Qwen3-VL-8B-Instruct, MOCK_ADVERTISE_URL: "http://qvl-sg-0:9000"}
-
   # ---- observability and tests ---------------------------------------------
   prometheus:
     image: prom/prometheus:latest
@@ -287,6 +260,7 @@ services:
       MW_E2E_GATEWAY: http://gateway:8080
       MW_E2E_GATEWAY_EVENTS: http://gateway-events:8080
       MW_E2E_TOKENIZER: http://tokenizer:8090
+      MW_E2E_REGISTRY: gateway:8081
       MW_E2E_CONTROL_TOKEN: ${MW_CONTROL_TOKEN:-local-control-token}
     depends_on:
       gateway: {condition: service_healthy}

@@ -1,0 +1,117 @@
+// ModelWeave Inference Protocol (mwip), version 1: the Registry service.
+//
+// The ModelWeave gateway implements Registry; engine instances are the
+// clients. An instance is one engine server running one model in one role
+// (encode, prefill, decode or unified). A model is served by many instances,
+// in different roles.
+//
+// Lifecycle: an instance is registered by its first Heartbeat and stays
+// registered while it sends one at least every HeartbeatResponse.ttl_ms; an
+// instance whose heartbeats stop expires after that. Deregister removes an
+// instance at once (graceful shutdown).
+//
+// When the gateway is configured with a control token, every call carries it
+// in the "x-modelweave-token" metadata; calls without it fail with
+// UNAUTHENTICATED.
+syntax = "proto3";
+
+package modelweave.mwip.v1;
+
+import "modelweave/mwip/v1/types.proto";
+
+option go_package = "github.com/leonyang215/ModelWeave/api/mwip/v1;mwipv1";
+
+// Registry is the control plane the gateway serves to engine instances.
+service Registry {
+  // Heartbeat registers or refreshes an instance and records its load, its
+  // KV cache events and whether it drains. It fails with INVALID_ARGUMENT
+  // (no id, no target, no role) or NOT_FOUND (a model the gateway does not
+  // serve); the message says why.
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+
+  // PublishKVEvents reports KV cache events between heartbeats, for
+  // gateways that route on engine KV events. NOT_FOUND for an unknown
+  // instance.
+  rpc PublishKVEvents(PublishKVEventsRequest) returns (PublishKVEventsResponse);
+
+  // Deregister removes an instance (graceful shutdown).
+  rpc Deregister(DeregisterRequest) returns (DeregisterResponse);
+}
+
+// Instance describes an engine instance.
+message Instance {
+  // Unique among the gateway's instances.
+  string id = 1;
+  // The gateway's model name, or one of its aliases.
+  string model = 2;
+  Role role = 3;
+  // gRPC target of the instance's Engine service ("host:port"; "https://"
+  // for TLS). The gateway calls it.
+  string target = 4;
+  // A decode instance that also runs whole (normal) requests.
+  bool normal = 5;
+  // Where decode instances fetch this prefill instance's KV (bootstrap
+  // handshake), engine-defined.
+  string bootstrap_addr = 6;
+  // Id of the instance in the engines' KV connector; defaults to id.
+  string engine_id = 7;
+  // Static capacity hints; a reported EngineState takes precedence.
+  int64 kv_capacity_tokens = 8;
+  int32 max_running_requests = 9;
+  int64 max_prefill_queue_tokens = 10;
+  // Tokens per KV block of the block hashes in KV events (default 64).
+  int32 block_size = 11;
+  map<string, string> labels = 12;
+}
+
+// KVEvents is a batch of KV cache events of an instance. Blocks are named by
+// the chained block hashes of the token list (docs/protocol.md, "KV events
+// and block hashing").
+message KVEvents {
+  // Blocks that became resident.
+  repeated uint64 stored = 1;
+  // Blocks that were evicted.
+  repeated uint64 removed = 2;
+  // Everything the instance held was dropped (before stored).
+  bool cleared = 3;
+}
+
+// HeartbeatRequest registers or refreshes an instance.
+message HeartbeatRequest {
+  Instance instance = 1;
+  // Absent: liveness only.
+  EngineState state = 2;
+  KVEvents kv_events = 3;
+  // The instance takes no new requests and finishes its running ones.
+  bool draining = 4;
+}
+
+// HeartbeatResponse answers an accepted heartbeat.
+message HeartbeatResponse {
+  // The instance was unknown before this call.
+  bool registered = 1;
+  // Send the next heartbeat within this many milliseconds.
+  int64 ttl_ms = 2;
+}
+
+// PublishKVEventsRequest carries KV events of an instance.
+message PublishKVEventsRequest {
+  string instance_id = 1;
+  KVEvents events = 2;
+}
+
+// PublishKVEventsResponse tells whether the events were applied (false when
+// the gateway does not route on KV events).
+message PublishKVEventsResponse {
+  bool applied = 1;
+}
+
+// DeregisterRequest removes an instance.
+message DeregisterRequest {
+  string instance_id = 1;
+}
+
+// DeregisterResponse tells whether the instance was registered.
+message DeregisterResponse {
+  bool removed = 1;
+}

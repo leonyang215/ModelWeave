@@ -1,9 +1,12 @@
-// Package registry keeps the set of inference workers, their reported engine
-// state, and the gateway's own accounting of in-flight work per worker.
+// Package registry keeps the set of engine instances (workers), their
+// reported engine state, and the gateway's own accounting of in-flight work
+// per instance. Every instance serves one model in one role; the scheduler
+// asks for the candidates of a model and role.
 //
-// Workers come from static configuration or register themselves through MWIP
-// heartbeats. Engine state arrives by push (heartbeats) or pull (pollers in
-// package enginestate); both end up in Worker.UpdateState.
+// Instances come from static configuration or register themselves with
+// heartbeats on the mwip Registry; those expire when their heartbeats stop.
+// Engine state arrives by push (heartbeats) or pull (Engine.GetState polls
+// in package enginestate); both end up in Worker.UpdateState.
 package registry
 
 import (
@@ -37,25 +40,23 @@ type Spec struct {
 	ID    string `json:"id" yaml:"id"`
 	Model string `json:"model" yaml:"model"`
 	Role  Role   `json:"role" yaml:"role"`
-	URL   string `json:"url" yaml:"url"` // base URL, e.g. http://10.0.0.7:9000
+	// Target is the instance's mwip target: where it serves the Engine
+	// service ("10.0.0.7:9001"; "https://" for TLS).
+	Target string `json:"target" yaml:"target"`
 	// Normal reports that a decode worker also runs normal (non-PD)
 	// requests: it prefills itself. Unified workers always do.
 	Normal bool `json:"normal,omitempty" yaml:"normal,omitempty"`
-	// BootstrapAddr is the KV bootstrap endpoint of a prefill worker, used
-	// by the bootstrap PD handshake (SGLang bootstrap server, vLLM
-	// MooncakeConnector side channel).
+	// BootstrapAddr is where decode instances fetch a prefill instance's KV
+	// in the bootstrap PD handshake (engine-defined).
 	BootstrapAddr string `json:"bootstrap_addr,omitempty" yaml:"bootstrap_addr,omitempty"`
-	// EngineID is the vLLM KV connector engine id of a prefill worker
-	// (remote_engine_id); defaults to the worker ID.
+	// EngineID is the instance's id in the engines' KV connector; defaults
+	// to the instance ID.
 	EngineID string `json:"engine_id,omitempty" yaml:"engine_id,omitempty"`
 	// Static capacity hints; reported engine state takes precedence.
 	KVCapacityTokens   int64             `json:"kv_capacity_tokens,omitempty" yaml:"kv_capacity_tokens,omitempty"`
 	MaxRunningRequests int               `json:"max_running_requests,omitempty" yaml:"max_running_requests,omitempty"`
 	MaxPrefillTokens   int64             `json:"max_prefill_queue_tokens,omitempty" yaml:"max_prefill_queue_tokens,omitempty"`
 	Labels             map[string]string `json:"labels,omitempty" yaml:"labels,omitempty"`
-	// StateURL overrides where pollers fetch engine state (for example a
-	// Prometheus /metrics endpoint on another port).
-	StateURL string `json:"state_url,omitempty" yaml:"state_url,omitempty"`
 }
 
 // ServesNormal reports whether the worker runs normal (non-PD) requests.
@@ -91,7 +92,8 @@ type Worker struct {
 	pendingSince  int64 // KV tokens reserved since the last state report
 	failures      int
 	unhealthyTill time.Time
-	draining      bool
+	draining      bool // drained by an operator (admin API)
+	engineDrain   bool // the engine reports draining (heartbeat)
 
 	inflight        atomic.Int64 // requests currently assigned (any stage)
 	inflightPrefill atomic.Int64 // uncached prompt tokens being prefilled
@@ -106,15 +108,22 @@ func (w *Worker) Spec() Spec { return *w.spec.Load() }
 // ID is shorthand for Spec().ID.
 func (w *Worker) ID() string { return w.spec.Load().ID }
 
-// UpdateState records an engine state report.
+// UpdateState records an engine state report (a heartbeat's or a poll's).
+// It does not refresh liveness: registration lives on heartbeats alone.
 func (w *Worker) UpdateState(st EngineState, at time.Time) {
 	w.mu.Lock()
 	w.state = st
 	w.stateAt = at
 	w.hasState = true
-	w.lastSeen = at
 	w.pendingSince = 0
 	w.mu.Unlock()
+}
+
+// LastSeen is when the worker last reported (a heartbeat or a state poll).
+func (w *Worker) LastSeen() time.Time {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.lastSeen
 }
 
 // Touch records liveness without a state report.
@@ -124,11 +133,27 @@ func (w *Worker) Touch(at time.Time) {
 	w.mu.Unlock()
 }
 
-// SetDraining marks the worker as not accepting new requests.
+// SetDraining drains the worker for an operator (admin API): it takes no
+// new requests until undrained, whatever the engine reports.
 func (w *Worker) SetDraining(d bool) {
 	w.mu.Lock()
 	w.draining = d
 	w.mu.Unlock()
+}
+
+// SetEngineDraining records whether the engine reports draining (its
+// heartbeats).
+func (w *Worker) SetEngineDraining(d bool) {
+	w.mu.Lock()
+	w.engineDrain = d
+	w.mu.Unlock()
+}
+
+// AdminDrained reports whether an operator drained the worker.
+func (w *Worker) AdminDrained() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.draining
 }
 
 // Snapshot is an immutable view of a worker used by one scheduling pass.
@@ -203,7 +228,7 @@ func (w *Worker) Snapshot(now time.Time, staleAfter time.Duration) Snapshot {
 		Spec:     spec,
 		LastSeen: w.lastSeen,
 		Failures: w.failures,
-		Draining: w.draining,
+		Draining: w.draining || w.engineDrain,
 	}
 	if w.hasState && (staleAfter <= 0 || now.Sub(w.stateAt) <= staleAfter) {
 		s.HasState = true

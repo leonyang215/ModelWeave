@@ -3,13 +3,21 @@
 package e2e
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
+	mwipv1 "github.com/leonyang215/ModelWeave/api/mwip/v1"
 )
 
 func TestMain(m *testing.M) {
@@ -56,40 +64,63 @@ func waitWorkers(gw string, want []string, deadline time.Time) bool {
 	}
 }
 
-// Workers that only encode, and workers that generate (every mock worker
-// serves all three engine protocols).
+// Instances that only encode, and instances that generate. Every mock
+// engine is one instance (one model in one role) implementing mwip.
 var (
-	encodeWorkers   = []string{"enc-0", "ev-0", "es-0", "qvl-enc-0"}
-	generateWorkers = []string{"prefill-0", "prefill-1", "decode-0", "decode-1", "pv-0", "dv-0", "pp-0", "dp-0",
-		"ps-0", "ds-0", "pf-0", "df-0", "normal-0", "normal-1", "normal-bad", "tiny-0",
-		"qwen-p0", "qwen-d0", "qvl-p0", "qvl-d0", "qvl-sg-0"}
+	encodeWorkers   = []string{"enc-0", "qvl-enc-0"}
+	generateWorkers = []string{"prefill-0", "prefill-1", "decode-0", "decode-1", "pp-0", "dp-0",
+		"pf-0", "df-0", "normal-0", "normal-1", "normal-bad", "tiny-0",
+		"qwen-p0", "qwen-d0", "qvl-p0", "qvl-d0"}
 	// Workers that also heartbeat to the second gateway.
 	secondGatewayWorkers = []string{"prefill-0", "prefill-1", "decode-0", "decode-1",
 		"qwen-p0", "qwen-d0", "qvl-enc-0", "qvl-p0", "qvl-d0"}
 )
 
+// Every model has its instances, one per mock engine, grouped by role.
 func TestWorkersRegisteredWithState(t *testing.T) {
 	ws := workers(t, gateway)
-	// The protocol is the model's engine protocol: the gateway decides it,
-	// the workers serve all of them.
-	for id, want := range map[string][2]string{
-		"enc-0": {"encode", "mwip"}, "prefill-0": {"prefill", "mwip"}, "decode-0": {"decode", "mwip"},
-		"ev-0": {"encode", "vllm"}, "pv-0": {"prefill", "vllm"}, "dv-0": {"decode", "vllm"},
-		"es-0": {"encode", "sglang"}, "ds-0": {"decode", "sglang"},
-		"normal-0": {"unified", "mwip"}, "tiny-0": {"unified", "mwip"},
-	} {
-		w, ok := ws[id]
-		if !ok || w.Role != want[0] || w.Protocol != want[1] || !w.Healthy {
-			t.Fatalf("worker %s: %+v, want role %s protocol %s", id, w, want[0], want[1])
+	want := map[string]map[string][]string{
+		"deepseek-v4.1":          {"encode": {"enc-0"}, "prefill": {"prefill-0", "prefill-1"}, "decode": {"decode-0", "decode-1"}},
+		"deepseek-v4.1-pull":     {"prefill": {"pp-0"}, "decode": {"dp-0"}},
+		"deepseek-v4.1-fallback": {"prefill": {"pf-0"}, "decode": {"df-0"}},
+		"deepseek-v4.1-normal":   {"unified": {"normal-0", "normal-1", "normal-bad"}},
+		"deepseek-v4.1-tiny":     {"unified": {"tiny-0"}},
+		"qwen3":                  {"prefill": {"qwen-p0"}, "decode": {"qwen-d0"}},
+		"qwen3-vl":               {"encode": {"qvl-enc-0"}, "prefill": {"qvl-p0"}, "decode": {"qvl-d0"}},
+	}
+	got := map[string]map[string][]string{}
+	for _, w := range ws {
+		if want[w.Model] == nil {
+			continue
 		}
-		if w.State == nil {
-			t.Fatalf("worker %s has no engine state", id)
+		if got[w.Model] == nil {
+			got[w.Model] = map[string][]string{}
+		}
+		got[w.Model][w.Role] = append(got[w.Model][w.Role], w.ID)
+		if !w.Healthy || w.State == nil || w.Target != w.ID+":9001" {
+			t.Fatalf("instance %s: %+v", w.ID, w)
 		}
 	}
-	if !ws["decode-0"].Normal || !ws["dv-0"].Normal || ws["ds-0"].Normal || !ws["normal-0"].Normal {
-		t.Fatalf("normal flags: decode-0 %v dv-0 %v ds-0 %v normal-0 %v", ws["decode-0"].Normal, ws["dv-0"].Normal, ws["ds-0"].Normal, ws["normal-0"].Normal)
+	for _, roles := range got {
+		for _, ids := range roles {
+			sort.Strings(ids)
+		}
 	}
-	// tiny-0 is static and only polled through its Prometheus endpoint.
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("instances by model and role:\n got %v\nwant %v", got, want)
+	}
+	if !ws["decode-0"].Normal || ws["dp-0"].Normal || !ws["normal-0"].Normal {
+		t.Fatalf("normal flags: decode-0 %v dp-0 %v normal-0 %v", ws["decode-0"].Normal, ws["dp-0"].Normal, ws["normal-0"].Normal)
+	}
+	// Heartbeat instances keep refreshing their registration (every
+	// second, well within the 6s TTL); tiny-0 is static and never expires.
+	if d := ws["decode-0"]; d.Source != "heartbeat" || d.HeartbeatAgeMS <= 0 || d.HeartbeatAgeMS > 3000 {
+		t.Fatalf("decode-0 registration: %+v", d)
+	}
+	if s := ws["tiny-0"]; s.Source != "static" || s.HeartbeatAgeMS != 0 {
+		t.Fatalf("tiny-0 registration: %+v", s)
+	}
+	// tiny-0 sends no heartbeats: its load comes from Engine.GetState polls.
 	if c := ws["tiny-0"].State["kv_capacity_tokens"]; c != float64(262144) {
 		t.Fatalf("tiny-0 state not polled: %v", ws["tiny-0"].State)
 	}
@@ -110,10 +141,14 @@ func TestControlPlaneToken(t *testing.T) {
 	if r.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("admin API without token: %d", r.StatusCode)
 	}
-	fake := post(t, gateway, "/mwip/v1/heartbeat", "", map[string]any{"worker": map[string]any{
-		"id": "intruder", "model": "deepseek-v4.1", "role": "decode", "url": "http://evil:9000"}}, nil)
-	if fake.status != http.StatusUnauthorized {
-		t.Fatalf("heartbeat without token: %d", fake.status)
+	// Engine instances register through the mwip Registry (gRPC), which
+	// needs the token too.
+	if rc, ok := registryClient(t); ok {
+		_, err := rc.Heartbeat(context.Background(), &mwipv1.HeartbeatRequest{
+			Instance: &mwipv1.Instance{Id: "intruder", Model: "deepseek-v4.1", Role: mwipv1.Role_ROLE_DECODE, Target: "evil:9001"}})
+		if status.Code(err) != codes.Unauthenticated {
+			t.Fatalf("heartbeat without token: %v", err)
+		}
 	}
 	if _, ok := workers(t, gateway)["intruder"]; ok {
 		t.Fatal("unauthenticated worker registered")
@@ -187,9 +222,8 @@ func TestChatShortPromptRunsNormal(t *testing.T) {
 	d := r.header.Get("X-ModelWeave-Decode-Worker")
 	st := workerStats(t, d)
 	req := st["last_request"].(map[string]any)
-	if st["last_protocol"] != "mwip" || path(req, "disagg", "mode") != "normal" || req["stream"] != true ||
-		len(req["token_ids"].([]any)) == 0 || path(req, "conversation", "thinking_mode") != false {
-		t.Fatalf("%s received %v: %v", d, st["last_protocol"], req)
+	if path(req, "disagg", "mode") != "DISAGG_MODE_NORMAL" || len(req["token_ids"].([]any)) == 0 || path(req, "conversation", "thinking_mode") != false {
+		t.Fatalf("%s received %v", d, req)
 	}
 }
 
@@ -235,8 +269,8 @@ func TestLongPromptPDThenPrefixHit(t *testing.T) {
 	}
 	// Push: D registered a receiver, P pushed the KV to it.
 	p, d := lastRequest(t, h.Get("X-ModelWeave-Prefill-Worker")), lastRequest(t, decodeWorker)
-	if path(p, "disagg", "role") != "prefill" || path(p, "disagg", "kv_receiver", "url") != "http://"+decodeWorker+":9000" ||
-		path(d, "disagg", "role") != "decode" || path(d, "disagg", "handshake") != "push" {
+	if path(p, "disagg", "role") != "ROLE_PREFILL" || path(p, "disagg", "kv_receiver", "url") != "http://"+decodeWorker+":9000" ||
+		path(d, "disagg", "role") != "ROLE_DECODE" || path(d, "disagg", "handshake") != "HANDSHAKE_PUSH" {
 		t.Fatalf("push fields: P %v D %v", p["disagg"], d["disagg"])
 	}
 

@@ -11,7 +11,7 @@
 //	        bootstrap or pull)
 //	epd_*   either of the above after an encode stage for media
 //
-// Workers are called in the model's engine protocol (mwip, vllm or sglang).
+// Workers are engine instances, called over mwip (package engine).
 package orchestrator
 
 import (
@@ -39,7 +39,6 @@ const (
 type Model struct {
 	Cfg       *config.Model
 	Name      string
-	Protocol  string // engine protocol of the model's workers
 	BlockSize int
 	Seed      uint64
 	Prefill   *scheduler.Scheduler
@@ -58,10 +57,8 @@ type Job struct {
 	Priority qos.Priority
 	Render   *mwip.RenderResult
 	// Media is the request's copy of the multimodal items; the encode stage
-	// attaches embedding artifacts (mwip) to it.
-	Media *mwip.Multimodal
-	// ECParams are the vLLM encoders' ec_transfer_params (EPD).
-	ECParams   map[string]any
+	// attaches embedding artifacts to it.
+	Media      *mwip.Multimodal
 	Blocks     []uint64 // prefix block hashes of the prompt
 	SessionKey string
 	Arrived    time.Time

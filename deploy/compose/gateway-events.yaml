@@ -1,10 +1,10 @@
-# Second gateway replica: the same deepseek-v4.1, qwen3 and qwen3-vl workers,
-# prefix index fed only by engine KV events. It is started with -engine-protocol vllm
-# (docker-compose.yaml): the startup option replaces engine.protocol, so this
-# replica talks vLLM's token-in API to the workers the first replica talks
-# mwip to, with NixlConnector-style pull (P returns kv_transfer_params).
+# Second gateway replica: the same deepseek-v4.1, qwen3 and qwen3-vl
+# instances (they register with both replicas), prefix index fed only by
+# engine KV events, PD with the pull handshake (P returns a kv_handle, D
+# fetches the KV).
 server:
   listen: ":8080"
+  grpc_listen: ":8081"            # mwip Registry
   log_format: json
   expose_routing_headers: true
   first_token_timeout: 30s
@@ -12,8 +12,6 @@ tokenizer:
   endpoints: ["http://tokenizer:8090"]
 discovery: {heartbeat_ttl: 6s}
 kv_index: {type: events, block_size: 64, optimistic_ttl: 1ms}
-engine:
-  protocol: mwip                  # overridden by -engine-protocol
 models:
   - name: deepseek-v4.1
     aliases: ["DeepSeek-V4.1-Flash"]
@@ -21,7 +19,6 @@ models:
     mode: auto
     pd: {handshake: pull}
     normal: {enabled: true, max_uncached_tokens: 512, min_cache_ratio: 0.6, fallback_to_pd: true}
-  # Qwen3 and Qwen3-VL over vLLM's token-in API with the same workers.
   - name: qwen3
     tokenizer_model: Qwen3-8B
     mode: auto

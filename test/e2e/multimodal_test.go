@@ -213,7 +213,7 @@ func TestEPDVideo(t *testing.T) {
 	req := lastRequest(t, p)
 	item := path(req, "multimodal", "items").([]any)[0].(map[string]any)
 	arts, _ := item["embedding_artifacts"].([]any)
-	if item["modality"] != "video" || len(arts) != 10 {
+	if item["modality"] != "MODALITY_VIDEO" || len(arts) != 10 {
 		t.Fatalf("%s: modality %v, %d artifacts", p, item["modality"], len(arts))
 	}
 	for k, a := range arts {
@@ -224,15 +224,6 @@ func TestEPDVideo(t *testing.T) {
 	if metric(t, gateway, "modelweave_media_items_total", `model="deepseek-v4.1"`, `modality="video"`) == 0 ||
 		metric(t, gateway, "modelweave_media_tokens_total", `model="deepseek-v4.1"`, `modality="video"`) < 1000 {
 		t.Fatal("video media metrics missing")
-	}
-	// Engines that expand media themselves have no video placeholder in
-	// DeepSeek V4.1: the gateway rejects before scheduling anything.
-	for _, model := range []string{"deepseek-v4.1-vllm", "deepseek-v4.1-sglang"} {
-		body["model"] = model
-		r := post(t, gateway, "/v1/chat/completions", keyA, body, nil)
-		if r.status != 400 || !strings.Contains(string(r.body), "needs the mwip engine protocol") {
-			t.Fatalf("%s video: %d %s", model, r.status, r.body)
-		}
 	}
 }
 

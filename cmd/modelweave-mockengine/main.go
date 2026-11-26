@@ -1,15 +1,16 @@
-// Command modelweave-mockengine runs a simulated inference worker for local
-// and CI testing. It serves every engine protocol the gateway can be
-// started with: the native intermediate state (/mwip/v1/generate), vLLM's
-// token-in generate (/inference/v1/generate) and SGLang's /generate. Every
-// flag can also be set with an MOCK_* variable (for example --decode-tps /
-// MOCK_DECODE_TPS).
+// Command modelweave-mockengine runs a simulated inference engine for local
+// and CI testing: one instance (one model in one role) that implements the
+// mwip Engine service (gRPC) and registers with the gateways' mwip Registry.
+// Every flag can also be set with an MOCK_* variable (for example
+// --decode-tps / MOCK_DECODE_TPS).
 package main
 
 import (
 	"context"
 	"flag"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
@@ -62,17 +63,20 @@ func envDur(name string, def time.Duration) time.Duration {
 
 func main() {
 	var c mockengine.Config
-	flag.StringVar(&c.ID, "id", env("id", "mock-0"), "worker ID")
+	var sc mockengine.ServeConfig
+	flag.StringVar(&c.ID, "id", env("id", "mock-0"), "instance ID")
 	flag.StringVar(&c.Model, "model", env("model", "deepseek-v4.1"), "served model name")
 	flag.StringVar(&c.Role, "role", env("role", "unified"), "encode, prefill, decode or unified")
-	flag.StringVar(&c.Listen, "listen", env("listen", ":9000"), "listen address")
-	flag.StringVar(&c.AdvertiseURL, "advertise-url", env("advertise-url", "http://127.0.0.1:9000"), "URL other components use to reach this worker")
-	flag.StringVar(&c.GatewayURL, "gateway-url", env("gateway-url", ""), "gateway URL for heartbeats (empty: static registration)")
-	flag.StringVar(&c.ControlToken, "control-token", env("control-token", ""), "X-ModelWeave-Token for the gateway control plane")
+	flag.StringVar(&sc.Listen, "listen", env("listen", ":9000"), "HTTP listen address (KV hand-off, artifacts, metrics, registration controls)")
+	flag.StringVar(&sc.GRPCListen, "grpc-listen", env("grpc-listen", ":9001"), "gRPC listen address (the mwip Engine service)")
+	flag.StringVar(&c.AdvertiseURL, "advertise-url", env("advertise-url", "http://127.0.0.1:9000"), "HTTP URL other mock instances use to reach this one")
+	flag.StringVar(&sc.Target, "target", env("target", ""), "mwip target registered for the instance (default: the advertise URL's host on the gRPC port)")
+	registry := flag.String("registry", env("registry", ""), "gateways' mwip Registry targets, comma separated (empty: configured statically)")
+	flag.StringVar(&sc.ControlToken, "control-token", env("control-token", ""), "x-modelweave-token of Registry calls")
+	flag.DurationVar(&sc.HeartbeatInterval, "heartbeat-interval", envDur("heartbeat-interval", time.Second), "heartbeat period")
 	flag.StringVar(&c.TokenizerURL, "tokenizer-url", env("tokenizer-url", ""), "tokenizer URL used to produce output tokens")
 	flag.StringVar(&c.TokenizerModel, "tokenizer-model", env("tokenizer-model", ""), "model name known to the tokenizer (default: its only model)")
-	flag.DurationVar(&c.HeartbeatInterval, "heartbeat-interval", envDur("heartbeat-interval", time.Second), "heartbeat period")
-	flag.BoolVar(&c.Normal, "normal", envBool("normal", false), "decode worker also runs normal (non-PD) requests")
+	flag.BoolVar(&c.Normal, "normal", envBool("normal", false), "decode instance also runs normal (non-PD) requests")
 	flag.Int64Var(&c.KVCapacityTokens, "kv-capacity-tokens", int64(envInt("kv-capacity-tokens", 262144)), "KV cache capacity in tokens")
 	flag.IntVar(&c.MaxRunning, "max-running", envInt("max-running", 64), "maximum concurrent requests")
 	flag.Int64Var(&c.MaxPrefillTokens, "max-prefill-tokens", int64(envInt("max-prefill-tokens", 0)), "advertised prefill queue limit (0: unlimited)")
@@ -89,18 +93,44 @@ func main() {
 	flag.BoolVar(&c.VerifyArtifacts, "verify-artifacts", envBool("verify-artifacts", true), "check embedding artifacts with their encoder")
 	logLevel := flag.String("log-level", env("log-level", "info"), "log level")
 	flag.Parse()
-	c.Log = obs.NewLogger(*logLevel, "json")
 	switch c.Role {
 	case "encode", "prefill", "decode", "unified":
 	default:
-		fmt.Fprintf(os.Stderr, "invalid role %q\n", c.Role)
-		os.Exit(2)
+		fail("invalid role %q: want encode, prefill, decode or unified", c.Role)
+	}
+	c.Log = obs.NewLogger(*logLevel, "json")
+	sc.Log = c.Log
+	for _, t := range strings.Split(*registry, ",") {
+		if t = strings.TrimSpace(t); t != "" {
+			sc.Registry = append(sc.Registry, t)
+		}
+	}
+	if sc.Target == "" {
+		sc.Target = grpcTarget(c.AdvertiseURL, sc.GRPCListen)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := mockengine.New(c).Run(ctx); err != nil {
+	if err := mockengine.NewServer(sc, mockengine.New(c)).Run(ctx); err != nil {
 		c.Log.Error("mock engine stopped", "error", err)
 		os.Exit(1)
 	}
+}
+
+func fail(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, format+"\n", args...)
+	os.Exit(2)
+}
+
+// grpcTarget is the advertise URL's host on the gRPC listen port.
+func grpcTarget(advertise, listen string) string {
+	host := "127.0.0.1"
+	if u, err := url.Parse(advertise); err == nil && u.Hostname() != "" {
+		host = u.Hostname()
+	}
+	_, port, err := net.SplitHostPort(listen)
+	if err != nil {
+		port = "9001"
+	}
+	return net.JoinHostPort(host, port)
 }

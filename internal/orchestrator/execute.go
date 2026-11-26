@@ -201,7 +201,7 @@ func countsAgainstHealth(e *engine.Error) bool {
 	case mwip.ErrCapacity, mwip.ErrNormalRejected, mwip.ErrBadRequest, mwip.ErrArtifact:
 		return false
 	}
-	return e.Transport || e.Status >= 500 || e.Code == mwip.ErrInternal
+	return e.Transport || e.Code == mwip.ErrInternal
 }
 
 func isStopped(err error) bool {
@@ -246,9 +246,8 @@ func errCode(err error) string {
 	return "error"
 }
 
-// stage builds one engine call of an attempt: the intermediate state, the
-// request's media (with encode-stage results) and the call's role. Engine
-// adapters turn it into the model's engine protocol.
+// stage builds one Generate call of an attempt: the intermediate state, the
+// request's media (with the encode stage's artifacts) and the call's role.
 func (o *Orchestrator) stage(job *Job, attemptID string, d mwip.Disagg) *engine.Stage {
 	timeout := time.Until(job.FirstTokenDeadline).Milliseconds()
 	if timeout < 1 {
@@ -260,12 +259,13 @@ func (o *Orchestrator) stage(job *Job, attemptID string, d mwip.Disagg) *engine.
 	d.BootstrapRoom = bootstrapRoom(attemptID)
 	return &engine.Stage{
 		Render: job.Render, AttemptID: attemptID, EngineModel: job.Model.Cfg.EngineModel, Disagg: d,
-		Media: job.Media, ECParams: job.ECParams, TimeoutMS: timeout,
+		Media: job.Media, TimeoutMS: timeout,
 		SessionKey: job.SessionKey, Priority: job.Priority.String(),
 	}
 }
 
-// bootstrapRoom derives SGLang's numeric bootstrap room from the attempt.
+// bootstrapRoom derives a numeric bootstrap room from the attempt, for KV
+// connectors that pair by number.
 func bootstrapRoom(attemptID string) int64 {
 	h := fnv.New64a()
 	_, _ = h.Write([]byte(attemptID))
@@ -276,7 +276,7 @@ func peer(d *scheduler.Decision) *mwip.Peer {
 	if d == nil {
 		return nil
 	}
-	p := &mwip.Peer{WorkerID: d.Spec.ID, URL: d.Spec.URL, BootstrapAddr: d.Spec.BootstrapAddr, EngineID: d.Spec.EngineID}
+	p := &mwip.Peer{WorkerID: d.Spec.ID, Target: d.Spec.Target, BootstrapAddr: d.Spec.BootstrapAddr, EngineID: d.Spec.EngineID}
 	if p.EngineID == "" {
 		p.EngineID = d.Spec.ID
 	}
@@ -289,8 +289,8 @@ func (o *Orchestrator) generate(ctx context.Context, job *Job, d *scheduler.Deci
 	if st.Disagg.Role != "" {
 		role = st.Disagg.Role
 	}
-	o.met.EngineRequests.WithLabelValues(job.Model.Name, role, job.Model.Protocol).Inc()
-	return o.eng.Generate(ctx, job.Model.Protocol, d.Spec, st)
+	o.met.EngineRequests.WithLabelValues(job.Model.Name, role).Inc()
+	return o.eng.Generate(ctx, d.Spec, st)
 }
 
 func (o *Orchestrator) runAttempt(ctx context.Context, job *Job, plan *Plan, attemptID string, emit Emit, out *Outcome) attemptResult {
@@ -337,7 +337,7 @@ func (o *Orchestrator) abortAll(job *Job, plan *Plan, attemptID string) {
 	}
 	for _, d := range targets {
 		go func(d *scheduler.Decision) {
-			_ = o.eng.Abort(context.Background(), job.Model.Protocol, d.Spec, attemptID)
+			_ = o.eng.Abort(context.Background(), d.Spec, attemptID)
 		}(d)
 	}
 }
@@ -550,8 +550,7 @@ func (o *Orchestrator) runPush(ctx context.Context, job *Job, plan *Plan, attemp
 }
 
 // runBootstrap: P and D are sent concurrently with a shared room; D fetches
-// KV from P's bootstrap server (SGLang bootstrap_host/port/room, vLLM
-// MooncakeConnector transfer_id + remote_bootstrap_addr).
+// KV from P's bootstrap server (disagg.prefill.bootstrap_addr).
 func (o *Orchestrator) runBootstrap(ctx context.Context, job *Job, plan *Plan, attemptID string, emit Emit, out *Outcome) attemptResult {
 	d, p := plan.D, plan.P
 	pReq := o.stage(job, attemptID, mwip.Disagg{Mode: mwip.ModeSplit, Role: "prefill", Handshake: mwip.HandshakeBootstrap, Prefill: peer(p), Decode: peer(d)})
@@ -565,8 +564,8 @@ func (o *Orchestrator) runBootstrap(ctx context.Context, job *Job, plan *Plan, a
 	return o.pump(ctx, job, readLoop(ctx, ds), pDone, emit, out, plan)
 }
 
-// runPull: P runs first and returns a KV handle on its stream (mwip
-// kv_handle, vLLM kv_transfer_params), then D pulls the KV with it.
+// runPull: P runs first and returns a KV handle on its stream (kv_handle),
+// then D pulls the KV with it.
 func (o *Orchestrator) runPull(ctx context.Context, job *Job, plan *Plan, attemptID string, emit Emit, out *Outcome) attemptResult {
 	d, p := plan.D, plan.P
 	t0 := time.Now()
@@ -583,11 +582,11 @@ func (o *Orchestrator) runPull(ctx context.Context, job *Job, plan *Plan, attemp
 	out.PrefillDur = time.Since(t0)
 	o.met.StageDuration.WithLabelValues(job.Model.Name, "prefill").Observe(out.PrefillDur.Seconds())
 	p.Reservation.PrefillDone()
-	if done.Handle == nil && done.KVTransferParams == nil {
+	if done.Handle == nil {
 		return attemptResult{err: &engine.Error{Role: "prefill", WorkerID: p.Spec.ID, Code: mwip.ErrInternal, Message: "prefill stream ended without a KV handle", Retriable: true}, failed: stageP}
 	}
 	dReq := o.stage(job, attemptID, mwip.Disagg{Mode: mwip.ModeSplit, Role: "decode", Handshake: mwip.HandshakePull, Prefill: peer(p), Decode: peer(d),
-		Handle: done.Handle, KVTransferParams: done.KVTransferParams})
+		Handle: done.Handle})
 	ds, err := o.generate(ctx, job, d, dReq)
 	if err != nil {
 		return attemptResult{err: err, failed: stageD}

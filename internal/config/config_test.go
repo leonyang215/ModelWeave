@@ -13,7 +13,7 @@ func TestExampleConfigIsValid(t *testing.T) {
 		t.Fatal(err)
 	}
 	m := c.ModelByName("DeepSeek-V4.1-Flash")
-	if m == nil || m.Name != "deepseek-v4.1" || m.PD.Handshake != "push" || !m.Normal.Enabled || !m.Normal.FallbackToPD || m.EngineProtocol != "mwip" {
+	if m == nil || m.Name != "deepseek-v4.1" || m.PD.Handshake != "push" || !m.Normal.Enabled || !m.Normal.FallbackToPD {
 		t.Fatalf("model not resolved: %+v", m)
 	}
 	if c.Server.FirstTokenTimeout.D() != 120*time.Second || c.KVIndex.Type != "approx" {
@@ -44,40 +44,25 @@ func TestDefaultsAndEnv(t *testing.T) {
 	}
 }
 
-func TestEngineProtocolPrecedence(t *testing.T) {
-	y := []byte(`
-tokenizer: {endpoints: [x]}
-engine: {protocol: vllm}
-models:
-  - {name: a}
-  - {name: b, engine_protocol: sglang, pd: {handshake: bootstrap}}
-`)
-	c, err := Parse(y)
+// mwip is the only engine protocol: there is nothing to choose, and the
+// options that chose one are gone.
+func TestEnginesSpeakMWIPOnly(t *testing.T) {
+	c, err := Parse([]byte("tokenizer: {endpoints: [x]}\nmodels: [{name: m}]\ndiscovery: {workers: [{id: w, model: m, role: unified, target: \"w:9001\"}]}\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Models[0].EngineProtocol != "vllm" || c.Models[1].EngineProtocol != "sglang" || c.Models[0].PD.Handshake != "bootstrap" {
-		t.Fatalf("config: %s %s %s", c.Models[0].EngineProtocol, c.Models[1].EngineProtocol, c.Models[0].PD.Handshake)
+	if c.Models[0].PD.Handshake != "push" || c.Discovery.Workers[0].Target != "w:9001" || c.Discovery.HeartbeatTTL.D() != 15*time.Second {
+		t.Fatalf("defaults: %+v %+v", c.Models[0].PD, c.Discovery)
 	}
-	// The startup option replaces engine.protocol; the model override wins.
-	c, err = ParseWith(y, Overrides{EngineProtocol: "mwip"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if c.Engine.Protocol != "mwip" || c.Models[0].EngineProtocol != "mwip" || c.Models[1].EngineProtocol != "sglang" || c.Models[0].PD.Handshake != "push" {
-		t.Fatalf("override: %s %s %s", c.Engine.Protocol, c.Models[0].EngineProtocol, c.Models[1].EngineProtocol)
-	}
-	// Starting a config without a handshake as sglang picks bootstrap.
-	s, err := ParseWith([]byte("tokenizer: {endpoints: [x]}\nmodels: [{name: m}]\n"), Overrides{EngineProtocol: "sglang"})
-	if err != nil || s.Models[0].PD.Handshake != "bootstrap" {
-		t.Fatalf("sglang default handshake: %v", err)
-	}
-	if _, err := ParseWith(y, Overrides{EngineProtocol: "grpc"}); err == nil {
-		t.Fatal("invalid startup protocol accepted")
-	}
-	d, err := Parse([]byte("tokenizer: {endpoints: [x]}\nmodels: [{name: m}]\n"))
-	if err != nil || d.Models[0].EngineProtocol != "mwip" {
-		t.Fatalf("default protocol: %v %v", d.Models[0].EngineProtocol, err)
+	for _, y := range []string{
+		"tokenizer: {endpoints: [x]}\nengine: {protocol: vllm}\nmodels: [{name: m}]",
+		"tokenizer: {endpoints: [x]}\nmodels: [{name: m, engine_protocol: vllm}]",
+		"tokenizer: {endpoints: [x]}\nengine_state: {poll: {enabled: true, format: prometheus}}\nmodels: [{name: m}]",
+		"tokenizer: {endpoints: [x]}\nmodels: [{name: m}]\ndiscovery: {workers: [{id: w, model: m, role: unified, target: t, state_url: u}]}",
+	} {
+		if _, err := Parse([]byte(y)); err == nil || !strings.Contains(err.Error(), "not found") {
+			t.Errorf("accepted %q: %v", y, err)
+		}
 	}
 }
 
@@ -89,11 +74,11 @@ func TestValidationErrors(t *testing.T) {
 		"dup alias":      {"tokenizer: {endpoints: [x]}\nmodels: [{name: m, aliases: [a]}, {name: a}]", "used twice"},
 		"unknown field":  {"tokenizer: {endpoints: [x]}\nmodels: [{name: m, bogus: 1}]", "bogus"},
 		"bad policy":     {"tokenizer: {endpoints: [x]}\nmodels: [{name: m, routing: {decode: {policy: best}}}]", "policy"},
-		"worker model":   {"tokenizer: {endpoints: [x]}\nmodels: [{name: m}]\ndiscovery: {workers: [{id: w, model: q, role: decode, url: u}]}", "unknown model"},
+		"worker model":   {"tokenizer: {endpoints: [x]}\nmodels: [{name: m}]\ndiscovery: {workers: [{id: w, model: q, role: decode, target: u}]}", "unknown model"},
+		"worker target":  {"tokenizer: {endpoints: [x]}\nmodels: [{name: m}]\ndiscovery: {workers: [{id: w, model: m, role: decode}]}", "target"},
+		"worker role":    {"tokenizer: {endpoints: [x]}\nmodels: [{name: m}]\ndiscovery: {workers: [{id: w, model: m, role: leader, target: u}]}", "role"},
 		"tenant prio":    {"tokenizer: {endpoints: [x]}\nmodels: [{name: m}]\ntenants: [{name: t, priority: urgent}]", "priority"},
 		"shared api key": {"tokenizer: {endpoints: [x]}\nmodels: [{name: m}]\ntenants: [{name: a, api_keys: [k]}, {name: b, api_keys: [k]}]", "shared"},
-		"bad protocol":   {"tokenizer: {endpoints: [x]}\nengine: {protocol: grpc}\nmodels: [{name: m}]", "protocol"},
-		"sglang pull":    {"tokenizer: {endpoints: [x]}\nmodels: [{name: m, engine_protocol: sglang, pd: {handshake: pull}}]", "bootstrap"},
 		"old fused":      {"tokenizer: {endpoints: [x]}\nmodels: [{name: m, mode: fused}]", "mode"},
 	} {
 		if _, err := Parse([]byte(tc.yaml)); err == nil || !strings.Contains(err.Error(), tc.want) {

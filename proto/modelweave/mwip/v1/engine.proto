@@ -1,0 +1,335 @@
+// ModelWeave Inference Protocol (mwip), version 1: the Engine service.
+//
+// Inference engines implement Engine; the ModelWeave gateway is the client.
+// An Engine server is one registered instance: one model in one role (see
+// registry.proto). It is the only way engines integrate with ModelWeave.
+//
+// Execution modes of a Generate call (GenerateRequest.disagg):
+//
+//   normal  the instance runs the whole request (a unified instance, or a
+//           decode instance registered with normal = true).
+//   split   prefill and decode run on two instances that share the request
+//           id and pair through one of three KV handshakes:
+//
+//     push       the gateway sends the decode leg first. The decode instance
+//                answers Accepted with its KV receiver and how much of the
+//                prompt it already caches. The gateway then sends the prefill
+//                leg with that receiver; the prefill instance pushes the KV
+//                the decode instance lacks and ends with PrefillDone.
+//     bootstrap  both legs are sent at once. The decode instance fetches the
+//                KV from disagg.prefill.bootstrap_addr for disagg.room.
+//     pull       the prefill leg runs first and ends with PrefillDone carrying
+//                a KV handle, which the gateway gives to the decode leg.
+//
+// The KV transfer itself (RDMA, NIXL, Mooncake, ...) is the engines' own:
+// the addresses in KVReceiver, KVHandle and bootstrap_addr are engine-defined.
+//
+// Messages may be large (a 1M-token prompt is about 5 MiB): engines must
+// accept messages of at least 64 MiB.
+syntax = "proto3";
+
+package modelweave.mwip.v1;
+
+import "modelweave/mwip/v1/types.proto";
+
+option go_package = "github.com/leonyang215/ModelWeave/api/mwip/v1;mwipv1";
+
+// Engine is the service an inference engine implements to be driven by the
+// ModelWeave gateway.
+service Engine {
+  // Generate runs one leg of a request and streams its output, parsed by the
+  // engine. The stream ends with exactly one Finish (normal and decode legs),
+  // PrefillDone (prefill legs) or Error. Canceling the call aborts the
+  // request: the engine stops it and frees its KV cache.
+  rpc Generate(GenerateRequest) returns (stream GenerateResponse);
+
+  // Encode builds the embeddings of media items on an encode instance: one
+  // artifact per placement of every item.
+  rpc Encode(EncodeRequest) returns (EncodeResponse);
+
+  // Abort stops requests by id. It is best effort: the gateway also cancels
+  // the Generate call.
+  rpc Abort(AbortRequest) returns (AbortResponse);
+
+  // GetState returns the load of the instance, for gateways that poll
+  // instances instead of reading their heartbeats.
+  rpc GetState(GetStateRequest) returns (GetStateResponse);
+}
+
+// Priority of a request, from its tenant.
+enum Priority {
+  PRIORITY_UNSPECIFIED = 0;
+  PRIORITY_LOW = 1;
+  PRIORITY_NORMAL = 2;
+  PRIORITY_HIGH = 3;
+  PRIORITY_CRITICAL = 4;
+}
+
+// DisaggMode is the execution mode of a Generate call.
+enum DisaggMode {
+  // Same as DISAGG_MODE_NORMAL.
+  DISAGG_MODE_UNSPECIFIED = 0;
+  // The instance runs the whole request.
+  DISAGG_MODE_NORMAL = 1;
+  // The call is the prefill or the decode leg of a split request.
+  DISAGG_MODE_SPLIT = 2;
+}
+
+// Handshake is how the two legs of a split request pair.
+enum Handshake {
+  HANDSHAKE_UNSPECIFIED = 0;
+  HANDSHAKE_PUSH = 1;
+  HANDSHAKE_BOOTSTRAP = 2;
+  HANDSHAKE_PULL = 3;
+}
+
+// Peer is one side of a KV hand-off, as the gateway knows it.
+message Peer {
+  string instance_id = 1;
+  // The instance's mwip target.
+  string target = 2;
+  // Where its KV can be fetched (bootstrap handshake), engine-defined.
+  string bootstrap_addr = 3;
+  // Its id in the engines' KV connector, when they need one.
+  string engine_id = 4;
+}
+
+// KVReceiver is where a decode leg takes the KV of a push handshake.
+message KVReceiver {
+  string instance_id = 1;
+  // Engine-defined address of the receiver.
+  string url = 2;
+  string room = 3;
+  // Leading prompt positions the decode instance already holds: the
+  // prefill instance only transfers the KV after them.
+  int32 cached_tokens = 4;
+}
+
+// KVHandle locates the KV a prefill leg keeps for the decode leg (pull).
+message KVHandle {
+  string instance_id = 1;
+  // Engine-defined address of the KV.
+  string url = 2;
+  string room = 3;
+  int32 tokens = 4;
+}
+
+// Disagg is the part a Generate call plays in its request.
+message Disagg {
+  DisaggMode mode = 1;
+  // ROLE_PREFILL or ROLE_DECODE, for split calls.
+  Role role = 2;
+  Handshake handshake = 3;
+  // Pairing token of the two legs (the request id).
+  string room = 4;
+  // Numeric form of room, for KV connectors that need one.
+  uint64 bootstrap_room = 5;
+  Peer prefill = 6;
+  Peer decode = 7;
+  // Push: where the prefill leg sends the KV.
+  KVReceiver kv_receiver = 8;
+  // Pull: where the decode leg fetches the KV.
+  KVHandle kv_handle = 9;
+}
+
+// GenerateRequest is the intermediate state of a request plus the part this
+// call plays in it.
+message GenerateRequest {
+  // Id of the attempt; the prefill and decode legs of a split request share
+  // it. The gateway retries with a new id.
+  string request_id = 1;
+  // Engine-side model name (the gateway's models[].engine_model); empty
+  // unless configured.
+  string model = 2;
+  // The prompt: the conversation rendered by the model's prompt format, every
+  // media position holding its pad value.
+  repeated uint32 token_ids = 3;
+  Multimodal multimodal = 4;
+  Conversation conversation = 5;
+  InferenceOptions inference_options = 6;
+  ParsingOptions parsing_options = 7;
+  Disagg disagg = 8;
+  // Time left for the first output, after which the gateway gives up.
+  int64 timeout_ms = 9;
+  // Requests of one session share it (prefix reuse, scheduling hints).
+  string session_key = 10;
+  Priority priority = 11;
+}
+
+// GenerateResponse is one message of a Generate stream.
+message GenerateResponse {
+  oneof event {
+    // Decode leg of a push handshake: registered, ready for the KV. Sent
+    // before anything else.
+    Accepted accepted = 1;
+    // End of a prefill leg.
+    PrefillDone prefill_done = 2;
+    // Output, parsed by the engine.
+    Delta delta = 3;
+    // End of a normal or decode leg.
+    Finish finish = 4;
+    // The call failed; ends the stream.
+    Error error = 5;
+  }
+}
+
+// Accepted answers the decode leg of a push handshake.
+message Accepted {
+  KVReceiver kv_receiver = 1;
+}
+
+// PrefillDone ends a prefill leg.
+message PrefillDone {
+  int32 prompt_tokens = 1;
+  // Prompt positions served from the prefill instance's cache.
+  int32 cached_tokens = 2;
+  // Pull: where the decode leg fetches the KV.
+  KVHandle kv_handle = 3;
+  Timing timing = 4;
+}
+
+// ToolCallDelta is a fragment of a tool call, with OpenAI streaming
+// semantics: the first fragment of a call carries its id and name, later
+// ones append to its arguments.
+message ToolCallDelta {
+  int32 index = 1;
+  string id = 2;
+  string name = 3;
+  string arguments = 4;
+}
+
+// TopLogprob is one candidate of an output position.
+message TopLogprob {
+  string token = 1;
+  double logprob = 2;
+  bytes bytes = 3;
+}
+
+// TokenLogprob is the log probability of one output token.
+message TokenLogprob {
+  string token = 1;
+  double logprob = 2;
+  bytes bytes = 3;
+  repeated TopLogprob top_logprobs = 4;
+}
+
+// Delta is output parsed by the engine: reasoning, content and tool calls
+// are separated, stop strings are not included.
+message Delta {
+  string content = 1;
+  string reasoning = 2;
+  repeated ToolCallDelta tool_calls = 3;
+  // Output tokens of this delta.
+  repeated uint32 token_ids = 4;
+  // One per output token, when logprobs were requested.
+  repeated TokenLogprob logprobs = 5;
+}
+
+// FinishReason is why generation stopped.
+enum FinishReason {
+  FINISH_REASON_UNSPECIFIED = 0;
+  // A stop token or stop string.
+  FINISH_REASON_STOP = 1;
+  // max_tokens.
+  FINISH_REASON_LENGTH = 2;
+  // The model finished with tool calls.
+  FINISH_REASON_TOOL_CALLS = 3;
+  FINISH_REASON_CONTENT_FILTER = 4;
+}
+
+// Usage is the token accounting of a request.
+message Usage {
+  // Prompt positions, cached ones included.
+  int32 prompt_tokens = 1;
+  // Output tokens, reasoning included.
+  int32 completion_tokens = 2;
+  int32 cached_tokens = 3;
+  int32 reasoning_tokens = 4;
+}
+
+// Timing reports engine-side latencies in milliseconds.
+message Timing {
+  double queue_ms = 1;
+  double encode_ms = 2;
+  double prefill_ms = 3;
+  double transfer_ms = 4;
+  double ttft_ms = 5;
+  double decode_ms = 6;
+}
+
+// Finish ends a normal or decode leg.
+message Finish {
+  FinishReason reason = 1;
+  // The stop string that matched, if one did.
+  string stop_sequence = 2;
+  Usage usage = 3;
+  Timing timing = 4;
+}
+
+// ErrorCode classifies failures; the gateway reacts per code.
+enum ErrorCode {
+  ERROR_CODE_UNSPECIFIED = 0;
+  // The instance is full; the gateway retries on another instance.
+  ERROR_CODE_CAPACITY_EXHAUSTED = 1;
+  // A decode instance declines a normal request; the gateway falls back to
+  // a split execution.
+  ERROR_CODE_NORMAL_REJECTED = 2;
+  // The KV hand-off failed; the gateway re-runs both legs.
+  ERROR_CODE_KV_TRANSFER_FAILED = 3;
+  // An embedding artifact is missing; the gateway rebuilds it once.
+  ERROR_CODE_ARTIFACT_UNAVAILABLE = 4;
+  // The request is invalid; the gateway fails it.
+  ERROR_CODE_BAD_REQUEST = 5;
+  ERROR_CODE_TIMEOUT = 6;
+  ERROR_CODE_ABORTED = 7;
+  ERROR_CODE_INTERNAL = 8;
+}
+
+// Error reports a failure. In a Generate stream it is the last message;
+// unary calls attach it to their gRPC status as a detail. A gRPC status
+// without one is classified by its code (RESOURCE_EXHAUSTED: capacity
+// exhausted, INVALID_ARGUMENT: bad request, ...).
+message Error {
+  ErrorCode code = 1;
+  string message = 2;
+  // Whether another attempt (on another instance) may succeed.
+  bool retriable = 3;
+}
+
+// EncodeRequest asks an encode instance for the embeddings of media items.
+message EncodeRequest {
+  // Id of the client request.
+  string request_id = 1;
+  // Id of this encode attempt.
+  string attempt_id = 2;
+  // Engine-side model name, as in GenerateRequest.
+  string model = 3;
+  // The items as rendered: their plans and placements tell what to build.
+  repeated MediaItem items = 4;
+  int64 timeout_ms = 5;
+}
+
+// EncodeResponse returns one artifact per placement of every item, in item
+// and placement order.
+message EncodeResponse {
+  repeated EmbeddingArtifact artifacts = 1;
+  double encode_ms = 2;
+}
+
+// AbortRequest stops requests.
+message AbortRequest {
+  repeated string request_ids = 1;
+}
+
+// AbortResponse tells how many requests were stopped.
+message AbortResponse {
+  int32 aborted = 1;
+}
+
+// GetStateRequest asks for the load of the instance.
+message GetStateRequest {}
+
+// GetStateResponse is the load of the instance.
+message GetStateResponse {
+  EngineState state = 1;
+}

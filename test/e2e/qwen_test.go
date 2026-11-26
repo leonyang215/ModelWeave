@@ -12,7 +12,7 @@ import (
 
 // Qwen3 and Qwen3-VL run next to DeepSeek V4.1 behind the same gateway and
 // tokenizer. Qwen3 workers: qwen-p0 (prefill), qwen-d0 (decode, normal);
-// Qwen3-VL: qvl-enc-0, qvl-p0, qvl-d0; Qwen3-VL over SGLang: qvl-sg-0.
+// Qwen3-VL: qvl-enc-0, qvl-p0, qvl-d0.
 
 const (
 	qwenIMStart  = 151644
@@ -150,7 +150,7 @@ func TestQwen3ThinkingPDAndPrefixHit(t *testing.T) {
 	}
 	d := lastRequest(t, "qwen-d0")
 	if path(d, "parsing_options", "reasoning_parser") != "qwen3" || path(d, "parsing_options", "tool_call_parser") != "hermes" ||
-		path(d, "parsing_options", "thinking_initial_stage") != "reasoning_start" ||
+		path(d, "parsing_options", "thinking_initial_stage") != "THINKING_STAGE_REASONING_START" ||
 		fmt.Sprint(ints(path(d, "inference_options", "stop_token_ids"))) != fmt.Sprint([]int{qwenIMEnd, qwenEOT}) ||
 		path(d, "conversation", "chat_template_kwargs", "enable_thinking") != true || ints(d["token_ids"])[0] != qwenIMStart {
 		t.Fatalf("qwen-d0 request: %v %v %v", d["parsing_options"], d["inference_options"], d["conversation"])
@@ -179,7 +179,7 @@ func TestQwen3NonThinkingAndSampling(t *testing.T) {
 	}
 	d := lastRequest(t, "qwen-d0")
 	io := d["inference_options"].(map[string]any)
-	if io["temperature"] != 0.3 || io["top_k"] != float64(20) || io["top_p"] != 0.95 || path(d, "parsing_options", "thinking_initial_stage") != nil {
+	if io["temperature"] != 0.3 || io["top_k"] != float64(20) || io["top_p"] != 0.95 || path(d, "parsing_options", "thinking_initial_stage") != "THINKING_STAGE_UNSPECIFIED" {
 		t.Fatalf("sampling %v parsing %v", io, d["parsing_options"])
 	}
 	ids := ints(d["token_ids"])
@@ -281,30 +281,29 @@ func TestQwen3ToolCallsEveryProtocol(t *testing.T) {
 	}
 }
 
-// The second gateway speaks vLLM's token-in API to the same Qwen3 workers:
-// the template variables the tokenizer rendered with reach vLLM's parsers,
-// and the worker parses Qwen's markup (derender).
-func TestQwen3OverVLLM(t *testing.T) {
+// The second gateway runs the same Qwen3 instances with the pull
+// handshake: the template variables the tokenizer rendered with reach the
+// engine, and the instance parses Qwen's markup itself.
+func TestQwen3PullOnSecondGateway(t *testing.T) {
 	r := post(t, gatewayEv, "/v1/chat/completions", "", chatBody("qwen3", "Hi", map[string]any{"chat_template_kwargs": map[string]any{"enable_thinking": false}}), nil)
 	m := message(t, r.json(t))["message"].(map[string]any)
 	if r.status != 200 || m["reasoning_content"] != nil || !strings.HasPrefix(m["content"].(string), "Hello from ModelWeave mock worker qwen-d0") {
-		t.Fatalf("vllm non-thinking: %d %s", r.status, r.body)
+		t.Fatalf("non-thinking: %d %s", r.status, r.body)
 	}
-	st := workerStats(t, "qwen-d0")
-	req := st["last_request"].(map[string]any)
-	if st["last_protocol"] != "vllm" || req["output_mode"] != "derender" || req["reasoning_ended"] != true ||
-		path(req, "parse_context", "chat_template_kwargs", "enable_thinking") != false || path(req, "sampling_params", "top_k") != float64(20) {
-		t.Fatalf("qwen-d0 vllm request: %v", req)
+	req := lastRequest(t, "qwen-d0")
+	if path(req, "conversation", "chat_template_kwargs", "enable_thinking") != false || path(req, "inference_options", "top_k") != float64(20) ||
+		path(req, "parsing_options", "reasoning_parser") != "qwen3" || path(req, "parsing_options", "thinking_initial_stage") == "THINKING_STAGE_REASONING_START" {
+		t.Fatalf("qwen-d0 request: %v", req)
 	}
 	r = post(t, gatewayEv, "/v1/chat/completions", "", chatBody("qwen3", longPrompt(), nil), nil)
 	m = message(t, r.json(t))["message"].(map[string]any)
 	if r.status != 200 || r.header.Get("X-ModelWeave-Mode") != "pd" || m["reasoning_content"] == nil ||
 		!strings.HasPrefix(m["content"].(string), "Hello from ModelWeave mock worker qwen-d0") {
-		t.Fatalf("vllm pd thinking: %d %v %s", r.status, r.header, r.body)
+		t.Fatalf("pd thinking: %d %v %s", r.status, r.header, r.body)
 	}
-	p := lastRequest(t, "qwen-p0")
-	if path(p, "kv_transfer_params", "do_remote_decode") != true || path(lastRequest(t, "qwen-d0"), "kv_transfer_params", "do_remote_prefill") != true {
-		t.Fatalf("pull handshake: P %v", p["kv_transfer_params"])
+	p, d := lastRequest(t, "qwen-p0"), lastRequest(t, "qwen-d0")
+	if path(p, "disagg", "handshake") != "HANDSHAKE_PULL" || path(d, "disagg", "kv_handle", "url") != "http://qwen-p0:9000" {
+		t.Fatalf("pull handshake: P %v D %v", p["disagg"], d["disagg"])
 	}
 }
 
@@ -366,17 +365,16 @@ func TestQwen3VLImageAndVideoEPD(t *testing.T) {
 	}
 }
 
-// Qwen3-VL over vLLM (second gateway): unlike DeepSeek V4.1, Qwen3-VL has a
-// video placeholder, so engines that expand media themselves get videos too:
-// each item collapses to the model's placeholder and goes as content_parts,
-// the encode stage runs on the EC producer, and the engine's expanded prompt
-// has the tokenizer's length.
-func TestQwen3VLVideoOverVLLM(t *testing.T) {
+// Qwen3-VL on the second gateway: the same encode instance builds the
+// artifacts of the video's kept frames and of the image, and the pull legs
+// get the expanded prompt with the artifacts attached.
+func TestQwen3VLOnSecondGateway(t *testing.T) {
 	body := qwenMedia("qwen3-vl")
 	_, rr := renderModel(t, "qwen3-vl", "chat_completions", body)
+	encodes := metric(t, gatewayEv, "modelweave_engine_requests_total", `model="qwen3-vl"`, `role="encode"`)
 	r := post(t, gatewayEv, "/v1/chat/completions", "", body, nil)
 	if r.status != 200 || !strings.Contains(string(r.body), "Hello from ModelWeave mock worker qvl-") {
-		t.Fatalf("qwen3-vl over vllm: %d %s", r.status, r.body)
+		t.Fatalf("qwen3-vl on gateway-events: %d %s", r.status, r.body)
 	}
 	if pt := path(r.json(t), "usage", "prompt_tokens"); pt != rr["prompt_tokens"] {
 		t.Fatalf("engine prompt_tokens %v, tokenizer %v", pt, rr["prompt_tokens"])
@@ -386,35 +384,15 @@ func TestQwen3VLVideoOverVLLM(t *testing.T) {
 		w = r.header.Get("X-ModelWeave-Decode-Worker")
 	}
 	req := lastRequest(t, w)
-	parts := req["content_parts"].([]any)
-	if len(parts) != 2 || path(parts[0], "type") != "video_url" || path(parts[1], "type") != "image_url" ||
-		countToken(req["token_ids"], qwenVideoPad) != 1 || countToken(req["token_ids"], qwenImagePad) != 1 || req["ec_transfer_params"] == nil {
-		t.Fatalf("%s vllm request: parts %v ec %v", w, parts, req["ec_transfer_params"])
+	items := path(req, "multimodal", "items").([]any)
+	va, _ := items[0].(map[string]any)["embedding_artifacts"].([]any)
+	ia, _ := items[1].(map[string]any)["embedding_artifacts"].([]any)
+	if len(va) != 5 || len(ia) != 1 || fmt.Sprint(ints(req["token_ids"])) != fmt.Sprint(ints(rr["token_ids"])) ||
+		countToken(req["token_ids"], qwenVideoPad) != 0 || countToken(req["token_ids"], qwenImagePad) != 0 {
+		t.Fatalf("%s request: %d video and %d image artifacts", w, len(va), len(ia))
 	}
-	if layout := path(req["modelweave"].(map[string]any)["media"].([]any)[0], "layout"); layout == nil {
-		t.Fatal("video media hint carries no layout")
-	}
-	if metric(t, gatewayEv, "modelweave_engine_requests_total", `model="qwen3-vl"`, `role="encode"`, `protocol="vllm"`) < 2 {
-		t.Fatal("vllm encode legs not counted")
-	}
-}
-
-// Qwen3-VL over SGLang: images and videos go raw as image_data and
-// video_data; SGLang encodes them itself.
-func TestQwen3VLOverSGLang(t *testing.T) {
-	body := qwenMedia("qwen3-vl-sglang")
-	_, rr := renderModel(t, "qwen3-vl", "chat_completions", body)
-	r := post(t, gateway, "/v1/chat/completions", keyA, body, nil)
-	if r.status != 200 || r.header.Get("X-ModelWeave-Decode-Worker") != "qvl-sg-0" ||
-		!strings.HasPrefix(message(t, r.json(t))["message"].(map[string]any)["content"].(string), "Hello from ModelWeave mock worker qvl-sg-0") {
-		t.Fatalf("qwen3-vl over sglang: %d %v %s", r.status, r.header, r.body)
-	}
-	if pt := path(r.json(t), "usage", "prompt_tokens"); pt != rr["prompt_tokens"] {
-		t.Fatalf("engine prompt_tokens %v, tokenizer %v", pt, rr["prompt_tokens"])
-	}
-	req := lastRequest(t, "qvl-sg-0")
-	if len(req["image_data"].([]any)) != 1 || len(req["video_data"].([]any)) != 1 || countToken(req["input_ids"], qwenVideoPad) != 1 {
-		t.Fatalf("qvl-sg-0 request: image_data %v video_data %v", req["image_data"], req["video_data"])
+	if d := metric(t, gatewayEv, "modelweave_engine_requests_total", `model="qwen3-vl"`, `role="encode"`) - encodes; d != 2 {
+		t.Fatalf("encode calls on gateway-events: %v, want 2", d)
 	}
 }
 

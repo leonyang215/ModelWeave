@@ -16,7 +16,7 @@ func newReg(t *testing.T, role registry.Role, n int, mut func(*registry.Spec)) *
 	t.Helper()
 	reg := registry.New(time.Minute)
 	for i := 0; i < n; i++ {
-		s := registry.Spec{ID: fmt.Sprintf("w%d", i), Model: "m", Role: role, URL: fmt.Sprintf("http://w%d", i)}
+		s := registry.Spec{ID: fmt.Sprintf("w%d", i), Model: "m", Role: role, Target: fmt.Sprintf("http://w%d", i)}
 		if mut != nil {
 			mut(&s)
 		}

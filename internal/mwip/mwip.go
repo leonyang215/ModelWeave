@@ -1,35 +1,26 @@
-// Package mwip defines the ModelWeave wire contracts (docs/protocol.md):
+// Package mwip holds the in-memory form of the ModelWeave contracts
+// (docs/protocol.md):
 //
-//   - the intermediate state the tokenizer returns: the conversation
+//   - the intermediate state the tokenizer returns (JSON): the conversation
 //     rendered into one token list by the model's prompt format (DeepSeek,
 //     Qwen, any chat template), images and videos expanded to pad-value
 //     positions, with the options engines need to generate and parse;
-//   - the native engine protocol (POST /mwip/v1/generate, /mwip/v1/encode):
-//     the intermediate state plus execution fields, answered with parsed
-//     output events;
-//   - the control plane (heartbeats, KV events).
+//   - generate requests and the events of their output streams, which the
+//     gateway sends to and reads from engines;
+//   - encode requests and KV events.
 //
-// vLLM and SGLang requests are adapted from the intermediate state in
-// package engine; their wire types live in package wire.
+// On the wire, engines speak mwip, the gRPC protocol defined in
+// proto/modelweave/mwip/v1 (Go code in api/mwip/v1); proto.go converts
+// between the two forms.
 package mwip
 
 import "encoding/json"
-
-// Version of the protocol, sent as the MWIP-Version header.
-const Version = "2"
 
 // API protocols understood by the tokenizer.
 const (
 	ProtocolChatCompletions = "chat_completions" // OpenAI /v1/chat/completions
 	ProtocolResponses       = "responses"        // OpenAI /v1/responses
 	ProtocolMessages        = "messages"         // Anthropic /v1/messages
-)
-
-// Engine protocols the gateway speaks to workers.
-const (
-	EngineMWIP   = "mwip"   // the intermediate state, POST /mwip/v1/generate
-	EngineVLLM   = "vllm"   // POST /inference/v1/generate (token in, derender out)
-	EngineSGLang = "sglang" // POST /generate
 )
 
 // ---------------------------------------------------------------------------
@@ -207,9 +198,9 @@ type MediaItem struct {
 	Plan         MediaPlan            `json:"plan"`
 	Span         Span                 `json:"span"` // whole range (a video's includes timestamp text)
 	Placements   []Placement          `json:"placements"`
-	// Placeholder replaces Span for engines that expand media themselves
-	// (vLLM, SGLang); empty when the model has none for the modality, so
-	// only the mwip protocol can carry the item.
+	// Placeholder is the model's own placeholder of the item in its prompt
+	// format, for engines that run the model's media processor on the raw
+	// item; empty when the model has none for the modality.
 	Placeholder []uint32 `json:"placeholder,omitempty"`
 	// Embeddings are set by the gateway after the encode stage: one per
 	// placement, in placement order.
@@ -269,7 +260,7 @@ type Placement struct {
 // Output types shared by every engine protocol
 // ---------------------------------------------------------------------------
 
-// Usage is the token accounting of a request (OpenAI / vLLM UsageInfo).
+// Usage is the token accounting of a request (OpenAI usage).
 type Usage struct {
 	PromptTokens            int                      `json:"prompt_tokens"`
 	CompletionTokens        int                      `json:"completion_tokens"`
@@ -365,18 +356,17 @@ const (
 	// is sent afterwards and pushes KV to D (Mooncake-style order).
 	HandshakePush = "push"
 	// HandshakeBootstrap: P and D get the request concurrently with a
-	// shared room; D fetches KV from P's bootstrap server (SGLang,
-	// vLLM MooncakeConnector).
+	// shared room; D fetches KV from P's bootstrap server.
 	HandshakeBootstrap = "bootstrap"
-	// HandshakePull: P runs first and returns a KV handle (vLLM:
-	// kv_transfer_params) that D uses to pull the KV (NixlConnector).
+	// HandshakePull: P runs first and returns a KV handle that D uses to
+	// pull the KV.
 	HandshakePull = "pull"
 )
 
 // Peer identifies one side of a KV transfer.
 type Peer struct {
 	WorkerID      string `json:"worker_id"`
-	URL           string `json:"url"`
+	Target        string `json:"target"` // its mwip target
 	BootstrapAddr string `json:"bootstrap_addr,omitempty"`
 	EngineID      string `json:"engine_id,omitempty"`
 }
@@ -405,23 +395,21 @@ type Disagg struct {
 	Role          string      `json:"role,omitempty"` // prefill | decode (split)
 	Handshake     string      `json:"handshake,omitempty"`
 	Room          string      `json:"room,omitempty"`           // pairing token (== attempt id)
-	BootstrapRoom int64       `json:"bootstrap_room,omitempty"` // numeric room (SGLang)
+	BootstrapRoom int64       `json:"bootstrap_room,omitempty"` // numeric room, for KV connectors
 	Prefill       *Peer       `json:"prefill,omitempty"`
 	Decode        *Peer       `json:"decode,omitempty"`
 	Receiver      *KVReceiver `json:"kv_receiver,omitempty"` // push: given to P
 	Handle        *KVHandle   `json:"kv_handle,omitempty"`   // pull: given to D
-	// KVTransferParams are a vLLM prefill's kv_transfer_params handed to D.
-	KVTransferParams map[string]any `json:"kv_transfer_params,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
-// Native engine protocol: POST /mwip/v1/generate
+// Generate: modelweave.mwip.v1.Engine/Generate
 // ---------------------------------------------------------------------------
 
-// GenerateRequest is the intermediate state with execution fields. The
-// engine parses its own output (reasoning, tool calls, stop sequences,
-// structured output) with ParsingOptions and Conversation, and answers with
-// an NDJSON stream of GenerateEvent.
+// GenerateRequest is the intermediate state with execution fields
+// (mwipv1.GenerateRequest in memory). The engine parses its own output
+// (reasoning, tool calls, stop sequences, structured output) with
+// ParsingOptions and Conversation, and answers with a stream of events.
 type GenerateRequest struct {
 	RequestID        string           `json:"request_id"` // attempt id, shared by P and D
 	Model            string           `json:"model,omitempty"`
@@ -430,7 +418,6 @@ type GenerateRequest struct {
 	Conversation     Conversation     `json:"conversation"`
 	InferenceOptions InferenceOptions `json:"inference_options"`
 	ParsingOptions   ParsingOptions   `json:"parsing_options"`
-	Stream           bool             `json:"stream"`
 	Disagg           Disagg           `json:"disagg"`
 	TimeoutMS        int64            `json:"timeout_ms,omitempty"`
 	SessionKey       string           `json:"session_key,omitempty"`
@@ -447,17 +434,15 @@ const (
 	EventError       = "error"
 )
 
-// GenerateEvent is one event of an engine output stream: an NDJSON line of
-// the native protocol, and what the vLLM and SGLang adapters translate
-// their chunks into.
+// GenerateEvent is one event of an engine output stream (a message of an
+// mwip Generate stream).
 type GenerateEvent struct {
 	Type string `json:"type"`
 
-	Receiver         *KVReceiver    `json:"kv_receiver,omitempty"`
-	Handle           *KVHandle      `json:"kv_handle,omitempty"`
-	KVTransferParams map[string]any `json:"kv_transfer_params,omitempty"`
-	PromptTokens     int            `json:"prompt_tokens,omitempty"`
-	CachedTokens     int            `json:"cached_tokens,omitempty"`
+	Receiver     *KVReceiver `json:"kv_receiver,omitempty"`
+	Handle       *KVHandle   `json:"kv_handle,omitempty"`
+	PromptTokens int         `json:"prompt_tokens,omitempty"`
+	CachedTokens int         `json:"cached_tokens,omitempty"`
 
 	// delta: parsed by the engine
 	Content   string           `json:"content,omitempty"`
@@ -480,7 +465,7 @@ type GenerateEvent struct {
 }
 
 // ---------------------------------------------------------------------------
-// Native encode protocol: POST /mwip/v1/encode
+// Encode: modelweave.mwip.v1.Engine/Encode
 // ---------------------------------------------------------------------------
 
 // EmbeddingArtifact is the encoder output of one placement.
@@ -507,7 +492,7 @@ type EncodeResponse struct {
 	WorkerID  string              `json:"worker_id,omitempty"`
 }
 
-// Error codes reported by engines (event "error" or error bodies).
+// Error codes reported by engines (Error events, gRPC status details).
 const (
 	ErrCapacity       = "capacity_exhausted"   // no room now; retry elsewhere
 	ErrNormalRejected = "normal_rejected"      // decode worker declines non-PD requests
@@ -519,7 +504,8 @@ const (
 	ErrInternal       = "internal"
 )
 
-// ErrorBody is the JSON body of a non-2xx response.
+// ErrorBody is the JSON body of a failed HTTP call (the admin API, the
+// mock engine's test endpoints).
 type ErrorBody struct {
 	Type      string `json:"type"` // always "error"
 	Code      string `json:"code"`
@@ -527,48 +513,10 @@ type ErrorBody struct {
 	Retriable bool   `json:"retriable,omitempty"`
 }
 
-// AbortRequest is POST /mwip/v1/abort.
-type AbortRequest struct {
-	RequestID string `json:"request_id"`
-}
-
-// ---------------------------------------------------------------------------
-// Control plane
-// ---------------------------------------------------------------------------
-
-// WorkerInfo is the identity part of a heartbeat.
-type WorkerInfo struct {
-	ID                 string            `json:"id"`
-	Model              string            `json:"model"`
-	Role               string            `json:"role"`
-	URL                string            `json:"url"`
-	Normal             bool              `json:"normal,omitempty"` // a decode worker that also runs non-PD requests
-	BootstrapAddr      string            `json:"bootstrap_addr,omitempty"`
-	EngineID           string            `json:"engine_id,omitempty"` // vLLM KV connector engine id
-	KVCapacityTokens   int64             `json:"kv_capacity_tokens,omitempty"`
-	MaxRunningRequests int               `json:"max_running_requests,omitempty"`
-	MaxPrefillTokens   int64             `json:"max_prefill_queue_tokens,omitempty"`
-	BlockSize          int               `json:"block_size,omitempty"`
-	Labels             map[string]string `json:"labels,omitempty"`
-}
-
-// KVEvents is a batch of KV cache events (block hashes per docs/protocol.md).
+// KVEvents is a batch of KV cache events of one instance (block hashes per
+// docs/protocol.md).
 type KVEvents struct {
 	Stored  []uint64 `json:"stored,omitempty"`
 	Removed []uint64 `json:"removed,omitempty"`
 	Cleared bool     `json:"cleared,omitempty"`
-}
-
-// Heartbeat is POST /mwip/v1/heartbeat.
-type Heartbeat struct {
-	Worker   WorkerInfo      `json:"worker"`
-	State    json.RawMessage `json:"state,omitempty"` // registry.EngineState
-	KVEvents *KVEvents       `json:"kv_events,omitempty"`
-	Draining bool            `json:"draining,omitempty"`
-}
-
-// HeartbeatAck answers a heartbeat.
-type HeartbeatAck struct {
-	OK    bool  `json:"ok"`
-	TTLMS int64 `json:"ttl_ms"`
 }

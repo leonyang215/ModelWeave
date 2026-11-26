@@ -19,7 +19,7 @@ func TestObservability(t *testing.T) {
 		"modelweave_stage_duration_seconds_bucket", "modelweave_schedule_decisions_total", "modelweave_prefix_cache_match_ratio_bucket",
 		"modelweave_execution_plans_total", "modelweave_admission_total", "modelweave_queue_wait_seconds_bucket",
 		"modelweave_worker_up", "modelweave_worker_kv_utilization", "modelweave_worker_inflight_requests",
-		"modelweave_heartbeats_total", "modelweave_engine_state_polls_total", "modelweave_tokenizer_client_duration_seconds_bucket",
+		"modelweave_heartbeats_total", "modelweave_instance_removals_total", "modelweave_engine_state_polls_total", "modelweave_tokenizer_client_duration_seconds_bucket",
 		"modelweave_overload_level", "modelweave_pool_utilization", "modelweave_finish_reasons_total",
 		"modelweave_engine_requests_total", "modelweave_model_info", "modelweave_media_items_total", "modelweave_media_tokens_total",
 		"modelweave_execution_plans_total", "modelweave_fallbacks_total", "modelweave_embedding_artifact_lookups_total",
@@ -49,11 +49,11 @@ func TestObservability(t *testing.T) {
 	}
 }
 
-// Clients stream or not; every generate call the engines received during the
-// whole suite, over every engine protocol, was a streaming one. Encoders
-// only receive encode calls (mwip /mwip/v1/encode, or the vLLM EC producer
-// leg), which are unary.
-func TestEnginesOnlyReceiveStreaming(t *testing.T) {
+// Clients stream or not; engines are always called the same way. Over the
+// whole suite every instance received the calls of its role only: Generate
+// streams for prefill, decode and unified instances, Encode calls for
+// encode instances.
+func TestEveryInstanceServedItsRole(t *testing.T) {
 	for _, streaming := range []bool{false, true} {
 		body := chatBody("deepseek-v4.1-normal", "Hi", map[string]any{"thinking": map[string]any{"type": "disabled"}, "stream": streaming})
 		if streaming {
@@ -63,25 +63,21 @@ func TestEnginesOnlyReceiveStreaming(t *testing.T) {
 		}
 	}
 	served := 0
-	protocols := map[string]float64{}
 	for _, id := range generateWorkers {
 		st := workerStats(t, id)
-		if st["non_streaming_requests"] != float64(0) {
-			t.Fatalf("%s received %v non-streaming generate calls", id, st["non_streaming_requests"])
+		if st["encode_requests"] != float64(0) {
+			t.Fatalf("%s (%s) received %v Encode calls", id, st["role"], st["encode_requests"])
 		}
-		if st["streaming_requests"].(float64) > 0 {
+		if st["generate_requests"].(float64) > 0 {
 			served++
 		}
-		for p, n := range st["by_protocol"].(map[string]any) {
-			protocols[p] += n.(float64)
-		}
 	}
-	if served < 14 || protocols["mwip"] == 0 || protocols["vllm"] == 0 || protocols["sglang"] == 0 {
-		t.Fatalf("%d workers served traffic, generate calls by protocol %v", served, protocols)
+	if served < 14 {
+		t.Fatalf("only %d of %d generating instances served traffic", served, len(generateWorkers))
 	}
 	for _, id := range encodeWorkers {
-		if st := workerStats(t, id); st["streaming_requests"] != float64(0) || st["non_streaming_requests"] != float64(0) {
-			t.Fatalf("encoder %s received generate calls: %v", id, st)
+		if st := workerStats(t, id); st["generate_requests"] != float64(0) || st["encode_requests"].(float64) == 0 {
+			t.Fatalf("encoder %s: %v Generate and %v Encode calls", id, st["generate_requests"], st["encode_requests"])
 		}
 	}
 	for _, label := range []string{`stream="true"`, `stream="false"`} {
@@ -89,12 +85,9 @@ func TestEnginesOnlyReceiveStreaming(t *testing.T) {
 			t.Fatalf("no successful client requests with %s", label)
 		}
 	}
-	for _, proto := range []string{`protocol="mwip"`, `protocol="vllm"`, `protocol="sglang"`} {
-		if metric(t, gateway, "modelweave_engine_requests_total", proto) == 0 {
-			t.Fatalf("no engine calls with %s", proto)
+	for _, role := range []string{"encode", "prefill", "decode", "unified"} {
+		if metric(t, gateway, "modelweave_engine_requests_total", `role="`+role+`"`) == 0 {
+			t.Fatalf("no engine calls to %s instances", role)
 		}
-	}
-	if metric(t, gatewayEv, "modelweave_engine_requests_total", `protocol="vllm"`) == 0 || metric(t, gatewayEv, "modelweave_engine_requests_total", `protocol="mwip"`) != 0 {
-		t.Fatal("gateway-events (-engine-protocol vllm) must only speak vllm")
 	}
 }

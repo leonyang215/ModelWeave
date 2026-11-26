@@ -10,6 +10,7 @@ FROM golang:${GO_VERSION}-${DEBIAN_VERSION} AS go-build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
+COPY api ./api
 COPY cmd ./cmd
 COPY internal ./internal
 ARG VERSION=dev
@@ -35,13 +36,16 @@ USER 10001
 FROM runtime AS gateway
 COPY --from=go-build /out/modelweave-gateway /usr/local/bin/modelweave-gateway
 COPY configs/gateway.example.yaml /etc/modelweave/gateway.yaml
-EXPOSE 8080
+# 8080: OpenAI / Anthropic APIs and admin; 8081: the mwip Registry (gRPC).
+EXPOSE 8080 8081
 ENTRYPOINT ["modelweave-gateway"]
 CMD ["-config", "/etc/modelweave/gateway.yaml"]
 
 FROM runtime AS mockengine
 COPY --from=go-build /out/modelweave-mockengine /usr/local/bin/modelweave-mockengine
-EXPOSE 9000
+# 9000: KV hand-off between mocks, metrics, counters, registration controls;
+# 9001: the mwip Engine service (gRPC).
+EXPOSE 9000 9001
 ENTRYPOINT ["modelweave-mockengine"]
 
 # Serves every bundled model (configs/tokenizer.example.toml): DeepSeek V4.1,

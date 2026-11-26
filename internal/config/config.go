@@ -39,7 +39,6 @@ func (d Duration) D() time.Duration { return time.Duration(d) }
 type Config struct {
 	Server      Server      `yaml:"server"`
 	Tokenizer   Tokenizer   `yaml:"tokenizer"`
-	Engine      Engine      `yaml:"engine"`
 	Auth        Auth        `yaml:"auth"`
 	Tenants     []Tenant    `yaml:"tenants"`
 	Discovery   Discovery   `yaml:"discovery"`
@@ -60,8 +59,12 @@ type Server struct {
 	IdleTimeout         Duration `yaml:"idle_timeout"`
 	ExposeRoutingHeader bool     `yaml:"expose_routing_headers"`
 	ShutdownGrace       Duration `yaml:"shutdown_grace"`
-	// ControlToken, when set, is required (X-ModelWeave-Token header) on the
-	// worker control plane (/mwip/v1/*) and the admin API (/admin/*).
+	// GRPCListen is where the gateway serves the mwip Registry, the gRPC
+	// control plane engine instances register with (default :8081).
+	GRPCListen string `yaml:"grpc_listen"`
+	// ControlToken, when set, is required on the mwip Registry
+	// (x-modelweave-token metadata) and the admin API (/admin/*,
+	// X-ModelWeave-Token header).
 	ControlToken string `yaml:"control_token"`
 }
 
@@ -69,29 +72,6 @@ type Server struct {
 type Tokenizer struct {
 	Endpoints []string `yaml:"endpoints"`
 	Timeout   Duration `yaml:"timeout"`
-}
-
-// Engine selects how the gateway talks to inference workers.
-type Engine struct {
-	// Protocol is the default engine protocol: "mwip" (send the tokenizer's
-	// intermediate state as is, POST /mwip/v1/generate), "vllm" (adapt to
-	// POST /inference/v1/generate) or "sglang" (adapt to POST /generate).
-	// The gateway's -engine-protocol flag overrides it; models may override
-	// both with engine_protocol.
-	Protocol string `yaml:"protocol"`
-}
-
-// EngineProtocols lists the supported engine protocols.
-var EngineProtocols = []string{"mwip", "vllm", "sglang"}
-
-// ValidEngineProtocol reports whether p is supported.
-func ValidEngineProtocol(p string) bool {
-	for _, x := range EngineProtocols {
-		if p == x {
-			return true
-		}
-	}
-	return false
 }
 
 // Auth configures API-key authentication.
@@ -111,29 +91,29 @@ type Tenant struct {
 	MaxConcurrency int      `yaml:"max_concurrency"`
 }
 
-// Discovery configures worker discovery.
+// Discovery configures how engine instances are found. Instances register
+// with heartbeats on the mwip Registry (server.grpc_listen) and expire when
+// no heartbeat arrives for HeartbeatTTL; Workers lists static instances,
+// which never expire.
 type Discovery struct {
 	HeartbeatTTL Duration        `yaml:"heartbeat_ttl"`
 	Workers      []registry.Spec `yaml:"workers"`
 }
 
-// EngineState configures engine-state adapters.
+// EngineState configures how the gateway learns the load of instances:
+// heartbeats carry it, and Poll asks instances for it.
 type EngineState struct {
+	// StaleAfter bounds how long a load report is trusted.
 	StaleAfter Duration `yaml:"stale_after"`
 	Poll       Poll     `yaml:"poll"`
 }
 
-// Poll configures pull-based engine state collection.
+// Poll configures polling every instance with Engine.GetState (for static
+// instances, which send no heartbeats).
 type Poll struct {
 	Enabled  bool     `yaml:"enabled"`
 	Interval Duration `yaml:"interval"`
 	Timeout  Duration `yaml:"timeout"`
-	// Format is "mwip" (GET /mwip/v1/state) or "prometheus" (scrape).
-	Format string `yaml:"format"`
-	// Preset selects the Prometheus metric names: "vllm" or "sglang".
-	Preset string `yaml:"preset"`
-	// Metrics overrides individual Prometheus metric names.
-	Metrics map[string]string `yaml:"metrics"`
 }
 
 // Health configures passive health checking.
@@ -158,11 +138,9 @@ type Model struct {
 	Name           string   `yaml:"name"`
 	Aliases        []string `yaml:"aliases"`
 	TokenizerModel string   `yaml:"tokenizer_model"`
-	// EngineModel is the model name engines serve; sent as the generate
-	// request's model when set (vLLM checks it), omitted otherwise.
+	// EngineModel is the model name engines serve; sent as the Generate
+	// request's model when set, empty otherwise.
 	EngineModel string `yaml:"engine_model"`
-	// EngineProtocol overrides engine.protocol for this model's workers.
-	EngineProtocol string `yaml:"engine_protocol"`
 	// ContextLength caps the context window (for engines started with a
 	// shorter one); 0 uses the window the tokenizer registers for the model.
 	ContextLength int `yaml:"context_length"`
@@ -179,8 +157,7 @@ type Model struct {
 
 // PD configures prefill/decode disaggregation.
 type PD struct {
-	// Handshake: push | bootstrap | pull. Default: push for mwip, bootstrap
-	// for vllm and sglang.
+	// Handshake: push (default) | bootstrap | pull.
 	Handshake string `yaml:"handshake"`
 }
 
@@ -257,30 +234,18 @@ type Retry struct {
 	Backoff       Duration `yaml:"backoff"`
 }
 
-// Overrides are startup options that take precedence over the file.
-type Overrides struct {
-	// EngineProtocol replaces engine.protocol (models without their own
-	// engine_protocol follow it).
-	EngineProtocol string
-}
-
 // Load reads and validates a config file.
-func Load(path string) (*Config, error) { return LoadWith(path, Overrides{}) }
-
-// LoadWith reads a config file and applies startup overrides.
-func LoadWith(path string, ov Overrides) (*Config, error) {
+func Load(path string) (*Config, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	return ParseWith(b, ov)
+	return Parse(b)
 }
 
-// Parse parses YAML (with ${ENV} expansion) and applies defaults.
-func Parse(b []byte) (*Config, error) { return ParseWith(b, Overrides{}) }
-
-// ParseWith parses YAML, applies startup overrides and defaults.
-func ParseWith(b []byte, ov Overrides) (*Config, error) {
+// Parse parses YAML (with ${ENV} expansion), applies defaults and
+// validates.
+func Parse(b []byte) (*Config, error) {
 	expanded := os.Expand(string(b), func(k string) string {
 		if v, ok := os.LookupEnv(k); ok {
 			return v
@@ -292,9 +257,6 @@ func ParseWith(b []byte, ov Overrides) (*Config, error) {
 	dec.KnownFields(true)
 	if err := dec.Decode(&c); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
-	}
-	if ov.EngineProtocol != "" {
-		c.Engine.Protocol = ov.EngineProtocol
 	}
 	c.applyDefaults()
 	if err := c.validate(); err != nil {
@@ -314,6 +276,9 @@ func (c *Config) applyDefaults() {
 	if s.Listen == "" {
 		s.Listen = ":8080"
 	}
+	if s.GRPCListen == "" {
+		s.GRPCListen = ":8081"
+	}
 	if s.MaxBodyBytes <= 0 {
 		s.MaxBodyBytes = 32 << 20
 	}
@@ -328,9 +293,6 @@ func (c *Config) applyDefaults() {
 	defDur(&s.IdleTimeout, 120*time.Second)
 	defDur(&s.ShutdownGrace, 30*time.Second)
 	defDur(&c.Tokenizer.Timeout, 30*time.Second)
-	if c.Engine.Protocol == "" {
-		c.Engine.Protocol = "mwip"
-	}
 	if c.Auth.AnonymousTenant == "" {
 		c.Auth.AnonymousTenant = "anonymous"
 	}
@@ -339,9 +301,6 @@ func (c *Config) applyDefaults() {
 	p := &c.EngineState.Poll
 	defDur(&p.Interval, 2*time.Second)
 	defDur(&p.Timeout, time.Second)
-	if p.Format == "" {
-		p.Format = "mwip"
-	}
 	if c.Health.FailureThreshold <= 0 {
 		c.Health.FailureThreshold = 3
 	}
@@ -369,16 +328,8 @@ func (c *Config) applyDefaults() {
 		if m.Mode == "" {
 			m.Mode = "auto"
 		}
-		if m.EngineProtocol == "" {
-			m.EngineProtocol = c.Engine.Protocol
-		}
 		if m.PD.Handshake == "" {
-			// The native protocol's own handshake; vLLM (MooncakeConnector)
-			// and SGLang pair P and D through a bootstrap server.
 			m.PD.Handshake = "push"
-			if m.EngineProtocol == "vllm" || m.EngineProtocol == "sglang" {
-				m.PD.Handshake = "bootstrap"
-			}
 		}
 		if m.Normal.MaxUncachedTokens <= 0 {
 			m.Normal.MaxUncachedTokens = 1024
@@ -430,9 +381,6 @@ func (c *Config) validate() error {
 	if len(c.Tokenizer.Endpoints) == 0 {
 		return fmt.Errorf("tokenizer.endpoints must list at least one tokenizer URL")
 	}
-	if !ValidEngineProtocol(c.Engine.Protocol) {
-		return fmt.Errorf("engine.protocol %q: want mwip, vllm or sglang", c.Engine.Protocol)
-	}
 	switch c.KVIndex.Type {
 	case "approx", "events", "none":
 	case "remote":
@@ -441,11 +389,6 @@ func (c *Config) validate() error {
 		}
 	default:
 		return fmt.Errorf("kv_index.type %q: want approx, events, remote or none", c.KVIndex.Type)
-	}
-	switch c.EngineState.Poll.Format {
-	case "mwip", "prometheus":
-	default:
-		return fmt.Errorf("engine_state.poll.format %q: want mwip or prometheus", c.EngineState.Poll.Format)
 	}
 	keys := map[string]string{}
 	for _, t := range c.Tenants {
@@ -484,12 +427,6 @@ func (c *Config) validate() error {
 		default:
 			return fmt.Errorf("model %s: mode %q: want auto, normal or pd", m.Name, m.Mode)
 		}
-		if !ValidEngineProtocol(m.EngineProtocol) {
-			return fmt.Errorf("model %s: engine_protocol %q: want mwip, vllm or sglang", m.Name, m.EngineProtocol)
-		}
-		if m.EngineProtocol == "sglang" && m.PD.Handshake != "bootstrap" {
-			return fmt.Errorf("model %s: sglang workers support pd.handshake bootstrap only", m.Name)
-		}
 		switch m.PD.Handshake {
 		case "push", "bootstrap", "pull":
 		default:
@@ -510,8 +447,8 @@ func (c *Config) validate() error {
 		}
 	}
 	for _, w := range c.Discovery.Workers {
-		if w.ID == "" || w.URL == "" || w.Model == "" {
-			return fmt.Errorf("static worker needs id, model and url: %+v", w)
+		if w.ID == "" || w.Target == "" || w.Model == "" {
+			return fmt.Errorf("static worker needs id, model and target: %+v", w)
 		}
 		if _, err := registry.ParseRole(string(w.Role)); err != nil {
 			return fmt.Errorf("worker %s: %w", w.ID, err)
