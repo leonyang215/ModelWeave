@@ -2,24 +2,27 @@
 
 `deploy/compose` runs ModelWeave on one machine without GPUs. It starts the
 real tokenizer, with the bundled DeepSeek V4.1, Qwen3 and Qwen3-VL
-tokenizers, two gateways and 25 mock workers that simulate inference
-(`modelweave-mockengine`: prefix KV cache, KV hand-off, encoders, timing,
-faults, and the output markup of DeepSeek and Qwen). The end-to-end tests run
-against it.
+tokenizers, two gateways and 18 mock engines (`modelweave-mockengine`:
+prefix KV cache, KV hand-off, encoders, timing, faults, and the output markup
+of DeepSeek and Qwen). Every mock engine is one instance, one model in one
+role: it implements mwip, the engine protocol
+([docs/mwip.md](../../docs/mwip.md)), on gRPC port 9001, and registers with
+the gateways' mwip Registry by heartbeat. The end-to-end tests run against
+it.
 
 ```sh
 make images   # modelweave/{tokenizer,gateway,mockengine,e2e}:dev
 make up       # start the stack
-make e2e      # 44 end-to-end tests inside the compose network
+make e2e      # 41 end-to-end tests inside the compose network
 make down     # stop and remove it
 ```
 
 | Service | Host port | What it is |
 |---|---|---|
 | `tokenizer` | 38090 (`MW_TOKENIZER_PORT`) | `modelweave-tokenizer` with [configs/tokenizer.example.toml](../../configs/tokenizer.example.toml) |
-| `gateway` | 38080 (`MW_GATEWAY_PORT`) | `modelweave-gateway` with [gateway.yaml](gateway.yaml): every model below, with its own engine protocol |
-| `gateway-events` | 38081 (`MW_GATEWAY_EVENTS_PORT`) | a second gateway with [gateway-events.yaml](gateway-events.yaml), started with `-engine-protocol vllm` |
-| 25 mock workers | | one per role and model; each serves mwip, vLLM and SGLang at once |
+| `gateway` | 38080 (`MW_GATEWAY_PORT`), Registry 38082 (`MW_GATEWAY_GRPC_PORT`) | `modelweave-gateway` with [gateway.yaml](gateway.yaml): every model below; instances register at `gateway:8081` (inside the stack) or `127.0.0.1:38082` (from the host) |
+| `gateway-events` | 38081 (`MW_GATEWAY_EVENTS_PORT`) | a second gateway with [gateway-events.yaml](gateway-events.yaml): the same `deepseek-v4.1`, `qwen3` and `qwen3-vl` instances (they register with both gateways), pull handshake, KV-event routing |
+| 18 mock engines | | one instance each: mwip (gRPC :9001); KV hand-off, metrics, counters and registration controls (HTTP :9000) |
 | `prometheus` | 39090 (`MW_PROMETHEUS_PORT`) | optional: `docker compose -f deploy/compose/docker-compose.yaml --profile monitoring up -d prometheus` |
 
 The host ports move with the variables, e.g. `MW_GATEWAY_PORT=48080 make up`.
@@ -27,23 +30,20 @@ The control-plane token is `local-control-token` (`MW_CONTROL_TOKEN`).
 
 ## Models
 
-| Model (gateway :38080) | Tokenizer model | Engine protocol | Workers | Demonstrates |
-|---|---|---|---|---|
-| `deepseek-v4.1` | DeepSeek-V4.1-Flash | mwip | enc-0, prefill-0/1, decode-0/1 | auto normal / PD (push), EPD with cached artifacts for images and videos, session affinity, cache-aware routing |
-| `deepseek-v4.1-vllm` | DeepSeek-V4.1-Flash | vllm | ev-0, pv-0, dv-0 | normal on the decode worker, PD with MooncakeConnector-style bootstrap, EPD through an EC producer (`ec_transfer_params`) |
-| `deepseek-v4.1-pull` | DeepSeek-V4.1-Flash | mwip | pp-0, dp-0 | PD with the pull handshake (`kv_handle`) |
-| `deepseek-v4.1-sglang` | DeepSeek-V4.1-Flash | sglang | es-0, ps-0, ds-0 | `/generate`, bootstrap handshake, engine-managed encoding (the registered encoder is never called), raw-text output |
-| `deepseek-v4.1-fallback` | DeepSeek-V4.1-Flash | mwip | pf-0, df-0 | normal rejected → PD fallback |
-| `deepseek-v4.1-normal` | DeepSeek-V4.1-Flash | mwip | normal-0/1, normal-bad | unified workers, session affinity, retry around and ejection of a broken worker |
-| `deepseek-v4.1-tiny` | DeepSeek-V4.1-Flash | mwip | tiny-0 | one slot: admission queue, queue-full rejection, client-disconnect abort; static worker polled via `/metrics`; context capped at 128K |
-| `qwen3` | Qwen3-8B | mwip | qwen-p0, qwen-d0 | hybrid thinking, hermes tool calls in every client protocol, auto normal / PD (push), prefix hits |
-| `qwen3-vl` | Qwen3-VL-8B-Instruct | mwip | qvl-enc-0, qvl-p0, qvl-d0 | images and videos planned like the Qwen3-VL processor, EPD with one artifact per image and kept frame |
-| `qwen3-vl-sglang` | Qwen3-VL-8B-Instruct | sglang | qvl-sg-0 | media collapsed to Qwen-VL placeholders, sent as `image_data` / `video_data` |
+| Model (gateway :38080) | Tokenizer model | Instances by role | Demonstrates |
+|---|---|---|---|
+| `deepseek-v4.1` | DeepSeek-V4.1-Flash | encode enc-0; prefill prefill-0/1; decode decode-0/1 | auto normal / PD (push), EPD with cached artifacts for images and videos, session affinity, cache-aware routing; the registration lifecycle in the e2e suite |
+| `deepseek-v4.1-pull` | DeepSeek-V4.1-Flash | prefill pp-0; decode dp-0 | PD with the pull handshake (`kv_handle`) |
+| `deepseek-v4.1-fallback` | DeepSeek-V4.1-Flash | prefill pf-0; decode df-0 | normal rejected → PD fallback |
+| `deepseek-v4.1-normal` | DeepSeek-V4.1-Flash | unified normal-0/1, normal-bad | normal on unified instances, session affinity, retry around and ejection of a broken instance |
+| `deepseek-v4.1-tiny` | DeepSeek-V4.1-Flash | unified tiny-0 | one slot: admission queue, queue-full rejection, client-disconnect abort; a static instance (no heartbeats), polled with `Engine.GetState`; context capped at 128K |
+| `qwen3` | Qwen3-8B | prefill qwen-p0; decode qwen-d0 | hybrid thinking, hermes tool calls in every client protocol, auto normal / PD (push), prefix hits |
+| `qwen3-vl` | Qwen3-VL-8B-Instruct | encode qvl-enc-0; prefill qvl-p0; decode qvl-d0 | images and videos planned like the Qwen3-VL processor, EPD with one artifact per image and kept frame |
+| `external-engine` | Qwen3-8B | none in the stack | engines outside the stack register here: the e2e suite's engine written against the proto, and [examples/python-engine](../../examples/python-engine) |
 
-The second gateway (`:38081`) drives the `deepseek-v4.1`, `qwen3` and
-`qwen3-vl` workers over vLLM's protocol (pull, NixlConnector style; Qwen3-VL
-videos go as `video_url` content parts through the EC producer) and routes on
-engine KV events only.
+The second gateway (`:38081`) runs the `deepseek-v4.1`, `qwen3` and
+`qwen3-vl` instances with the pull handshake, and routes on engine KV events
+only.
 
 Tenants (API keys, sent as `Authorization: Bearer ...` or `x-api-key`):
 `sk-team-a` (high priority), `sk-team-b`, `sk-limited` (3 requests per
@@ -75,11 +75,20 @@ curl -s localhost:38090/v1/render -H 'Content-Type: application/json' -d '{"prot
    "metadata":{"digest":"'$(printf a | sha256sum | cut -d" " -f1)'","width":1920,"height":1080}}]}]}}' \
   | jq '.prompt_tokens, (.multimodal.items[0] | {plan, placeholder})'
 
-# Workers and their state, and the engine protocol of every model
+# Instances by model and role: load, drain, heartbeat age
 curl -s -H 'X-ModelWeave-Token: local-control-token' localhost:38080/admin/workers
-curl -s localhost:38080/metrics | grep modelweave_model_info
+
+# The registration lifecycle: stop decode-1's heartbeats (it expires after the
+# 6s TTL), let it leave (removed at once), and bring it back
+docker compose -f deploy/compose/docker-compose.yaml exec decode-1 \
+  curl -s -X POST localhost:9000/mock/registration/pause    # then: leave, resume, drain, undrain
+curl -s localhost:38080/metrics | grep modelweave_instance_removals_total
 ```
 
 A long prompt runs PD (`prefill-*` → `decode-*`). Sent again, it is a
-prefix-cache hit on the decode worker that received its KV, which then runs
-it normal.
+prefix-cache hit on the decode instance that received its KV, which then
+runs it normal.
+
+To plug in an engine of your own, run
+[examples/python-engine](../../examples/python-engine): each process is one
+instance of `external-engine`, registered through `127.0.0.1:38082`.

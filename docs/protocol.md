@@ -5,13 +5,10 @@ client ──OpenAI Chat / Responses, Anthropic Messages (stream or not)──�
 gateway ──POST /v1/render──────────────────────────────────────────────▶ tokenizer
          ◀── intermediate state: token list (media expanded to pad values),
              media plans and placements, conversation / inference / parsing options
-gateway ──one engine protocol, chosen at startup (§2), every generate call streaming──▶ workers
-           mwip    POST /mwip/v1/generate      the intermediate state as is (NDJSON events)
-           vllm    POST /inference/v1/generate adapted: token in, output_mode derender (SSE)
-           sglang  POST /generate              adapted: input_ids + image_data / video_data (SSE)
+gateway ──mwip: gRPC modelweave.mwip.v1.Engine/Generate (§2), the intermediate state as is, always streaming──▶ instances
          ◀── parsed deltas: content / reasoning / tool calls, usage
 gateway ──SSE or one JSON body, formatted per client protocol──▶ client
-workers ──POST /mwip/v1/heartbeat, kv_events──▶ gateway   (control plane)
+instances ──gRPC modelweave.mwip.v1.Registry: one instance per heartbeat, load, KV events──▶ gateway   (§4)
 ```
 
 Each process has one job:
@@ -19,8 +16,8 @@ Each process has one job:
 | Process | Does | Does not |
 |---|---|---|
 | tokenizer | for every registered model: protocol conversion (OpenAI / Anthropic → the model's conversation), the model's prompt format (deepseek-recipe encodings, Hugging Face chat templates), tokenization, **media planning**: the token count of every image and video from its metadata and pixel controls, expanded in the token list as pad values | know engines; touch engine output |
-| engine | generation, stop strings, detokenization, **parsing** of reasoning and tool calls (mwip `parsing_options` name the parsers, vLLM `output_mode: "derender"`) | API formatting |
-| gateway | auth, QoS, scheduling, normal / PD / EPD orchestration; adapts the intermediate state to the engine protocol; calls every engine **streaming**; formats the client response, streamed (SSE) or as one JSON body, for Chat Completions, Responses or Messages | parse model output |
+| engine instance | generation, stop strings, detokenization, **parsing** of reasoning and tool calls (`parsing_options` name the parsers) | API formatting |
+| gateway | auth, QoS, scheduling over the instances of each model and role, normal / PD / EPD orchestration; sends the intermediate state to the instances, every call **streaming**; formats the client response, streamed (SSE) or as one JSON body, for Chat Completions, Responses or Messages | parse model output |
 
 ---
 
@@ -83,7 +80,8 @@ a 1920×1080 remote image (`max_long_side: 1024`) and a 10 s video
 
 * `conversation.chat_template_kwargs` are the template variables the prompt
   was rendered with (DeepSeek `thinking` / `reasoning_effort`, Qwen
-  `enable_thinking`); adapters pass them to engines whose parsers read them.
+  `enable_thinking`); engines whose parsers read them get them with the
+  conversation.
 * `parsing_options.reasoning_parser` / `tool_call_parser` name the markup of
   the output: `deepseek_v4` (reasoning ends at `</think>`, DSML tool calls),
   `qwen3` (`<think>…</think>`, the model may open it itself), `hermes`
@@ -243,7 +241,7 @@ values come from the model's `preprocessor_config.json` and
      "span": {"offset": 41, "length": 366},
      "placements": [{"offset": 41, "length": 366, "pad_value": 1728996728,
                      "reference": "55c64d0f...04e8", "modality": "image"}],
-     "placeholder": [129264]},                                       // what engines that expand media get
+     "placeholder": [129264]},                                       // the model's own placeholder of the item
     {"index": 1, "modality": "video",
      "digest": "67905ad3...6e6d",
      "source": {"kind": "url", "url": "https://video.example/clip.mp4"},
@@ -303,34 +301,31 @@ overrides. Without `--config` the tokenizer serves one model from flags
 
 ---
 
-## 2. Engines
+## 2. Engines: mwip
 
-### 2.1 Engine protocol and execution modes
+Engines integrate through one protocol: **mwip**, the gRPC services defined
+in [proto/modelweave/mwip/v1](../proto/modelweave/mwip/v1).
+[mwip.md](mwip.md) describes it for engine implementers; the proto files are
+its specification. There are no adapters for other engine APIs.
 
-The gateway speaks **one engine protocol per model**:
+### 2.1 Instances and execution modes
 
-| setting | scope |
-|---|---|
-| `engine.protocol` in the config (default `mwip`) | every model |
-| startup option `modelweave-gateway -engine-protocol mwip\|vllm\|sglang` (env `MW_ENGINE_PROTOCOL`) | replaces `engine.protocol` |
-| `models[].engine_protocol` | that model; wins over both |
-
-The chosen protocol shows in the startup log and in
-`modelweave_model_info{model, engine_protocol, mode, handshake, gateway_encode}`.
-
-Worker roles: `encode` (E), `prefill` (P), `decode` (D), `unified`. Execution
-modes:
+Every model is served by its own **instances**, one model in one role each:
+`encode` (E), `prefill` (P), `decode` (D), `unified`. An instance serves the
+`Engine` service at its mwip `target` and registers with the gateway (§4.1).
+Execution modes:
 
 | mode | what runs | |
 |---|---|---|
-| `normal` | one worker does prefill and decode: a unified worker, or a decode worker registered with `normal: true` | no PD split |
-| `pd` | P, then D, with a KV hand-off (§2.5) | PD split |
-| `epd_*` | the encode stage before either | when the gateway encodes (§2.6) |
+| `normal` | one instance does prefill and decode: a unified instance, or a decode instance registered with `normal: true` | no PD split |
+| `pd` | P, then D, with a KV hand-off (§2.3) | PD split |
+| `epd_*` | the encode stage before either | when the model has encode instances (§2.4) |
 
-`mode: auto` decides per request (normal when the decode worker would compute
-at most `normal.max_uncached_tokens`, holds `normal.min_cache_ratio` of the
-prompt, or the session is pinned to it; pd otherwise), `mode: normal` and
-`mode: pd` force one.
+`mode: auto` decides per request (normal when the decode instance would
+compute at most `normal.max_uncached_tokens`, holds `normal.min_cache_ratio`
+of the prompt, or the session is pinned to it; pd otherwise), `mode: normal`
+and `mode: pd` force one. The model's mode and handshake show in
+`modelweave_model_info{model, mode, handshake}`.
 
 Every call carries the **attempt** id (`<request id>-<n>`, shared by both
 legs of a PD attempt) as its request id, the remaining first-token budget,
@@ -338,172 +333,89 @@ and, with `models[].engine_model`, the engine's served model name. Every
 generate call is a **streaming** call, prefill legs included; non-streaming
 clients are served by aggregating the stream in the gateway.
 
-### 2.2 `mwip`: the intermediate state as is
+### 2.2 The Engine service: the intermediate state as is
 
-`POST /mwip/v1/generate` — the tokenizer's result plus execution fields:
-
-```json
-{
-  "request_id": "mw-3f2a...-1",
-  "model": "",
-  "token_ids": [...], "multimodal": {...},          // items carry embedding_artifacts after E
-  "conversation": {...}, "inference_options": {...}, "parsing_options": {...},
-  "stream": true,
-  "disagg": {"mode": "split", "role": "decode", "handshake": "push", "room": "mw-3f2a...-1",
-             "bootstrap_room": 4821930213,
-             "prefill": {"worker_id": "prefill-0", "url": "...", "bootstrap_addr": "...", "engine_id": "..."},
-             "decode": {...},
-             "kv_receiver": {...},                   // push: given to P
-             "kv_handle": {...}},                    // pull: given to D
-  "timeout_ms": 29750, "session_key": "user-42", "priority": "normal"
-}
-```
-
-`disagg.mode` is `normal` or `split`. The engine applies `stop_sequences`,
-parses reasoning with `reasoning_parser` (from `thinking_initial_stage`),
-tool calls with `tool_call_parser` (`parse_tool_calls`,
-`starts_in_tool_calls`) and JSON output, and answers with NDJSON events:
-
-```
-{"type":"accepted","kv_receiver":{"worker_id":"decode-0","url":"...","room":"...","cached_tokens":896},"worker_id":"decode-0"}
-{"type":"prefill_done","prompt_tokens":1183,"cached_tokens":0,"kv_handle":{...},"usage":{...},"timing":{...}}
-{"type":"delta","reasoning":"The","token_ids":[671]}
-{"type":"delta","tool_calls":[{"index":0,"id":"call_..","type":"function","function":{"name":"search_docs"}}],"token_ids":[3816]}
-{"type":"delta","content":"Hello","token_ids":[19923],"logprobs":[{"token":"Hello","logprob":-0.05,"top_logprobs":[...]}]}
-{"type":"finish","reason":"stop","stop_reason":"END","usage":{"prompt_tokens":1183,"completion_tokens":77,
- "prompt_tokens_details":{"cached_tokens":896},"completion_tokens_details":{"reasoning_tokens":17}},"timing":{...}}
-{"type":"error","code":"kv_transfer_failed","message":"...","retriable":true}
-```
-
-`accepted` is the decode leg's registration (push), `prefill_done` ends a
-prefill leg; `finish.reason` is `stop`, `length` or `tool_calls`.
-Rejections before streaming use HTTP status codes with
-`{"type": "error", "code": "capacity_exhausted", "message": "...", "retriable": true}`.
-
-`POST /mwip/v1/encode` (unary) builds the embeddings of media items, one
-artifact per placement:
-
-```json
-{"request_id": "...", "attempt_id": "...-enc0-1", "model": "deepseek-v4.1",
- "items": [{...item as rendered: plan and placements...}], "timeout_ms": 29000}
-→ {"artifacts": [{"reference": "9c0d...", "uri": "s3://...", "tokens": 594, "encoder": "enc-0"}], "encode_ms": 41.2}
-```
-
-`POST /mwip/v1/abort {"request_id": "..."}` stops a request (best effort; the
-gateway also closes the connection).
-
-### 2.3 `vllm`: vLLM's token-in generate
-
-`POST /inference/v1/generate` (`vllm/entrypoints/scale_out/token_in_token_out`):
-
-| intermediate state | vLLM `GenerateRequest` |
+| RPC | |
 |---|---|
-| `token_ids` | `token_ids` with every media item **collapsed** back to its `placeholder` (Qwen-VL `<\|image_pad\|>`, `<\|vision_start\|><\|video_pad\|><\|vision_end\|>`; DeepSeek V4.1 `<｜image｜>`): vLLM's processor expands it |
-| `multimodal.items[]` | `content_parts: [{"type": "image_url" \| "video_url", "url": source.url, "uuid": digest}]` (`uuid` is vLLM's multimodal cache key) |
-| `inference_options` | `sampling_params`: `max_tokens`, `temperature`, `top_p`, `top_k`, `min_p`, presence / frequency / repetition penalties, `seed`, `stop_token_ids`, `logprobs` (top-n), `structured_outputs` (`json` / `json_object` / `regex`), `skip_special_tokens: false`, `detokenize: true` |
-| `parsing_options.stop_sequences` | `sampling_params.stop` |
-| `conversation` | `parse_context` (`tools`, `tool_choice`, `include_reasoning`, `chat_template_kwargs` — the template variables the prompt was rendered with, e.g. Qwen `enable_thinking`), `reasoning_parser_kwargs` |
-| `parsing_options.thinking_initial_stage` | `reasoning_ended` |
-| — | `output_mode: "derender"` (vLLM parses its output), `stream: true`, `stream_options.include_usage` |
+| `Generate(GenerateRequest) returns (stream GenerateResponse)` | one leg of a request |
+| `Encode(EncodeRequest) returns (EncodeResponse)` | embeddings of media items, one artifact per placement |
+| `Abort(AbortRequest) returns (AbortResponse)` | stop requests by id |
+| `GetState(GetStateRequest) returns (GetStateResponse)` | the instance's load, for polling |
 
-ModelWeave-only data travels in a `modelweave` object stock vLLM ignores:
-`media` hints (`digest`, `modality`, `tokens`, `pad_value`, `placeholder`
-and, for items with text inside their span such as Qwen3-VL video
-timestamps, the expanded `layout` as run-length `[token, count]` pairs), the
-push handshake's `disagg`, `timeout_ms`. The response is vLLM's
-`GenerateDerenderStreamResponse` SSE (`delta` with `content`, `reasoning`,
-`tool_calls`; a usage chunk; `data: [DONE]`); abort is
-`POST /inference/v1/abort_requests {"request_ids": [...]}`.
+`GenerateRequest` is the tokenizer's result with the execution fields: the
+same `token_ids`, `multimodal` (with the encode stage's
+`embedding_artifacts`), `conversation`, `inference_options` and
+`parsing_options` as §1.1, plus `request_id`, `model`, `disagg` (`mode`,
+`role`, `handshake`, `room`, the `prefill` / `decode` peers, `kv_receiver`
+for push, `kv_handle` for pull), `timeout_ms`, `session_key` and `priority`.
+Values the JSON of §1.1 spells as strings are proto enums
+(`THINKING_STAGE_REASONING_START`, `MODALITY_VIDEO`, `CONSTRAINT_KIND_JSON`,
+...); tools are typed `Tool` messages with their JSON schema as a
+`google.protobuf.Struct`.
 
-### 2.4 `sglang`: SGLang's native generate
+The engine applies `stop_sequences`, parses reasoning with
+`reasoning_parser` (from `thinking_initial_stage`), tool calls with
+`tool_call_parser` (`parse_tool_calls`, `starts_in_tool_calls`) and JSON
+output, and streams `GenerateResponse` messages, each one of:
 
-`POST /generate`:
-
-| intermediate state | SGLang |
+| event | |
 |---|---|
-| attempt id | `rid` |
-| `token_ids` (media collapsed to their placeholders) | `input_ids` |
-| `multimodal.items[].source.url` | `image_data`, `video_data` (SGLang processes the media itself) |
-| `max_tokens`, `seed` | `sampling_params.max_new_tokens`, `sampling_seed` |
-| `temperature`, `top_p`, `top_k`, `min_p`, penalties, `stop_token_ids`, `stop_sequences` | the same names in `sampling_params`, `stop` |
-| `output_constraint` | `json_schema` / `regex` |
-| `logprobs`, `top_logprobs` | `return_logprob`, `top_logprobs_num`, `return_text_in_logprobs` |
+| `accepted` | the decode leg of a push handshake registered: its `kv_receiver` (address, room, cached prompt length); sent first |
+| `delta` | parsed output: `reasoning`, `content`, `tool_calls` fragments, `token_ids`, `logprobs` |
+| `finish` | end of a normal or decode leg: `reason` (`STOP`, `LENGTH`, `TOOL_CALLS`, `CONTENT_FILTER`), the matched `stop_sequence`, `usage` (prompt, cached, completion, reasoning tokens), `timing` |
+| `prefill_done` | end of a prefill leg: prompt and cached tokens, the `kv_handle` of a pull handshake, `timing` |
+| `error` | the leg failed: `code`, `message`, `retriable` (§2.5); ends the stream |
 
-The stream is `data: {"text", "output_ids", "meta_info": {"id", "finish_reason": {"type", "matched"}, "prompt_tokens", "completion_tokens", "cached_tokens"}}`
-… `data: [DONE]`; cumulative and `--incremental-streaming-output` streams
-are both understood. Abort: `POST /abort_request {"rid": ...}`.
+Canceling the call aborts the request; the gateway also sends `Abort` (best
+effort). Unary calls fail with a gRPC status, optionally carrying an mwip
+`Error` detail.
 
-**Limitation:** SGLang's `/generate` runs no reasoning or tool parser, so
-output arrives as raw text (`content`, including `</think>`, DSML or
-`<tool_call>` markup);
-the gateway does not parse it. Use `mwip` or `vllm` for reasoning and tool
-calls.
+### 2.3 PD (prefill / decode split)
 
-### 2.5 PD (prefill / decode split) per protocol
+`pd.handshake` selects the rendezvous (default `push`). D's first token
+decides success; a P failure before it aborts D and re-runs the pair
+(`retry.whole_retries`).
 
-`pd.handshake` selects the rendezvous (default `push` for mwip, `bootstrap`
-for vllm and sglang). D's first token decides success; a P failure before it
-aborts D and re-runs the pair (`retry.whole_retries`).
-
-| handshake | order | mwip (`disagg`) | vllm (`kv_transfer_params`) | sglang |
-|---|---|---|---|---|
-| `push` | D, then P | D answers `accepted` with its `kv_receiver` (and cached length); P gets `kv_receiver` and pushes the KV D lacks | P `{do_remote_decode, transfer_id}` + `modelweave.disagg.kv_receiver`; D `{do_remote_prefill, transfer_id}` (extension) | — |
-| `bootstrap` | P and D concurrently | both get `room`, `bootstrap_room`; D gets `prefill.bootstrap_addr` | P `{do_remote_decode: true, transfer_id}`; D `{do_remote_prefill: true, transfer_id, remote_bootstrap_addr, remote_engine_id}` (MooncakeConnector) | both legs `bootstrap_host`, `bootstrap_port`, `bootstrap_room` of P's bootstrap server |
-| `pull` | P, then D | P's `prefill_done` returns a `kv_handle`; D gets it | P `{do_remote_decode: true, remote_*: null}` returns `kv_transfer_params`; D gets them + `do_remote_prefill` (NixlConnector) | — |
-
-Prefill legs of vllm and sglang generate one token (`max_tokens: 1`); a mwip
-prefill leg ends with `prefill_done`. P's bootstrap address is
-`bootstrap_addr` from its registration (default: its host on port 8998),
-`remote_engine_id` its `engine_id` (default: the worker id).
-
-vLLM's NixlConnector returns `kv_transfer_params` with the prefill response;
-stock vLLM includes them only in non-streaming responses. ModelWeave keeps
-every generate call streaming, so a vLLM prefill engine used with `pull` must
-put them on its final stream chunk (`{"choices": [], "usage": {...},
-"kv_transfer_params": {...}}`); prefer `bootstrap` with stock engines. The
-KV transfer itself (RDMA, NIXL, Mooncake, ...) is engine-internal.
-
-### 2.6 EPD (encode stage) per protocol
-
-| protocol | encode stage | P / D receive |
+| handshake | order | `disagg` |
 |---|---|---|
-| `mwip` | gateway → E worker `POST /mwip/v1/encode`; artifacts **cached** by digest and plan | `multimodal.items[].embedding_artifacts` (one per placement: an image, or each kept frame) |
-| `vllm` | gateway → EC-producer instance: a non-streaming `POST /inference/v1/generate` whose prompt is just the items' placeholders, with their `content_parts` and `max_tokens: 1`; it answers `ec_transfer_params` keyed by `uuid` (vLLM's EPD proxy flow). Not cached | `content_parts` + `ec_transfer_params`: the engines' EC connector loads the embeddings |
-| `sglang` | **engine-managed**: a language-only prefill server dispatches media to its own encoders (`--encoder-urls`) and overrides any router choice, so the gateway has no E stage | `image_data`, `video_data` |
+| `push` | D, then P | D answers `accepted` with its `kv_receiver` (and cached length); P gets `kv_receiver` and pushes the KV D lacks |
+| `bootstrap` | P and D concurrently | both get `room` and `bootstrap_room`; D fetches from `prefill.bootstrap_addr` (the address P registered) |
+| `pull` | P, then D | P's `prefill_done` returns a `kv_handle`; D gets it and pulls the KV |
 
-Without encoders (or `encode.policy: never`) P / D encode media themselves.
-`artifact_unavailable` before any output makes the gateway rebuild once.
+A prefill leg ends with `prefill_done`. The peers carry each instance's id,
+target, `bootstrap_addr` and `engine_id` (its id in the engines' KV
+connector, default the instance id). The KV transfer itself (RDMA, NIXL,
+Mooncake, ...) is the engines' own.
 
-**Media without a placeholder** need `mwip`: vLLM and SGLang expand media
-themselves, from the model's placeholder. Qwen3-VL has one for images and
-videos; DeepSeek V4.1 has none for videos, so the gateway answers 400 for
-DeepSeek videos on vllm and sglang models before scheduling anything.
+### 2.4 EPD (encode stage)
 
-### 2.7 Support matrix
+The gateway sends each media item to an encode instance (`Engine.Encode`)
+before P / D are reserved. The answer is one artifact per placement (an
+image, or each kept video frame), **cached** by digest and plan. P / D get
+them as `multimodal.items[].embedding_artifacts`. Without encode instances
+(or with `encode.policy: never`) P / D encode media themselves from
+`source`. `artifact_unavailable` before any output makes the gateway rebuild
+the artifacts once.
 
-| | mwip | vllm | sglang |
-|---|---|---|---|
-| normal | ✓ | ✓ | ✓ |
-| pd: push / bootstrap / pull | ✓ / ✓ / ✓ | ✓ (extension) / ✓ / ✓ (stream must carry `kv_transfer_params`) | — / ✓ / — |
-| EPD, images | gateway E stage, cached artifacts | gateway E stage, `ec_transfer_params` | engine-managed |
-| videos | ✓ (one artifact per kept frame) | with a video placeholder (Qwen3-VL); else 400 | same as vllm, engine-managed |
-| engine-side parsing | ✓ `parsing_options` | ✓ `output_mode: derender` | raw text |
-
-### 2.8 Error codes
+### 2.5 Error codes
 
 | code | meaning | gateway reaction |
 |---|---|---|
-| `capacity_exhausted` | the worker is full (hard admission) | retry on another worker |
-| `normal_rejected` | decode worker declines a normal (non-PD) request | fall back to pd |
+| `capacity_exhausted` | the instance is full (hard admission) | retry on another instance |
+| `normal_rejected` | decode instance declines a normal (non-PD) request | fall back to pd |
 | `kv_transfer_failed` | KV hand-off failed | re-run pd (whole retry) |
 | `artifact_unavailable` | embedding artifact missing | rebuild via E, retry once |
 | `bad_request` | invalid request | fail the request (400) |
 | `timeout`, `internal`, `aborted` | | retry before the first token if retriable |
 
-vLLM `{"error": {...}}` bodies and in-stream errors are mapped to these codes
-(a ModelWeave code in `type` is used as is). The gateway never retries after
-the first output reached the client. HTTP 5xx and transport errors count
-against a worker's health.
+Engines send them as `error` events (`ERROR_CODE_CAPACITY_EXHAUSTED`, ...) or
+as gRPC status details; a plain gRPC status is classified by its code
+(`UNAVAILABLE`: transport failure, `RESOURCE_EXHAUSTED`: capacity,
+`INVALID_ARGUMENT` / `FAILED_PRECONDITION` / `OUT_OF_RANGE`: bad request,
+`DEADLINE_EXCEEDED`: timeout, `CANCELLED` / `ABORTED`: aborted, others:
+internal). The gateway never retries after the first output reached the
+client. Transport failures and internal errors count against an instance's
+health.
 
 ---
 
@@ -530,46 +442,56 @@ Messages).
 
 ---
 
-## 4. Control plane (worker → gateway)
+## 4. Control plane (instances → gateway)
 
-### 4.1 `POST /mwip/v1/heartbeat`
+### 4.1 The Registry (gRPC)
 
-Registers a worker (dynamic discovery) and reports its state. Send every
-1–5 s; a worker is removed after `discovery.heartbeat_ttl` without
-heartbeats.
+The gateway serves `modelweave.mwip.v1.Registry` on `server.grpc_listen`
+(default `:8081`). Every instance registers itself with heartbeats and
+reports its state; a heartbeat describes one instance.
 
-```json
-{
-  "worker": {"id": "decode-0", "model": "deepseek-v4.1", "role": "decode", "url": "http://decode-0:9000",
-             "normal": true, "kv_capacity_tokens": 262144, "max_running_requests": 32,
-             "max_prefill_queue_tokens": 0, "block_size": 64,
-             "bootstrap_addr": "", "engine_id": "", "labels": {}},
-  "state": { ... EngineState ... },
-  "kv_events": {"stored": [...], "removed": [...], "cleared": false},
-  "draining": false
-}
-```
+| RPC | |
+|---|---|
+| `Heartbeat(HeartbeatRequest)` | register or refresh an instance, with its `EngineState`, KV events and draining flag; answers `registered` (new to the gateway) and the `ttl_ms` |
+| `PublishKVEvents(PublishKVEventsRequest)` | KV events of an instance between heartbeats |
+| `Deregister(DeregisterRequest)` | remove an instance at once (graceful shutdown) |
 
-A worker does not declare an engine protocol: the gateway's configuration
-decides how it is called. `normal: true` lets a decode worker run normal
-requests. Answer: `{"ok": true, "ttl_ms": 15000}`. When the gateway sets
-`server.control_token`, control-plane calls must carry it in
-`X-ModelWeave-Token` (401 otherwise). `POST /mwip/v1/deregister {"worker_id": "..."}`
-removes a worker on graceful shutdown. Workers can also be configured
-statically (`discovery.workers`) with the same fields.
+An instance is described by `Instance`: `id`, `model` (a model name or
+alias), `role`, `target` (its Engine service), `normal`, `bootstrap_addr`,
+`engine_id`, capacity hints (`kv_capacity_tokens`, `max_running_requests`,
+`max_prefill_queue_tokens`), `block_size` and `labels`. A heartbeat without
+an id, a role or a target fails with `INVALID_ARGUMENT`, one for a model the
+gateway does not serve with `NOT_FOUND`; the status message says why. When
+the gateway sets `server.control_token`, Registry calls carry it in the
+`x-modelweave-token` metadata (`UNAUTHENTICATED` otherwise).
+
+Lifecycle ([mwip.md](mwip.md#the-lifecycle-of-an-instance)): the first
+heartbeat registers an instance in its model's pool for its role; heartbeats
+every 1–5 s keep it registered; one without a heartbeat for
+`discovery.heartbeat_ttl` expires; `draining: true` (or an operator's
+`POST /admin/workers/{id}/drain`) stops new requests; `Deregister` removes it
+at once; its next heartbeat registers it again.
+
+Instances can also be listed statically in `discovery.workers` with the same
+fields (`id`, `model`, `role`, `target`, ...). They send no heartbeats and
+never expire.
 
 ### 4.2 EngineState
 
-```json
-{"running_requests": 7, "waiting_requests": 1, "kv_used_tokens": 52000, "kv_capacity_tokens": 262144,
- "kv_usage": 0.2, "prefill_queue_tokens": 4096, "max_running_requests": 32,
- "decode_tokens_per_sec": 3100, "prefill_tokens_per_sec": 41000, "cached_blocks": 1800, "draining": false}
-```
+| field | |
+|---|---|
+| `running_requests`, `waiting_requests` | requests running and queued |
+| `kv_used_tokens`, `kv_capacity_tokens`, `kv_usage` | KV cache occupancy (tokens, or a 0..1 ratio) |
+| `prefill_queue_tokens` | prompt tokens waiting for prefill |
+| `max_running_requests` | the instance's concurrency limit |
+| `decode_tokens_per_sec`, `prefill_tokens_per_sec` | throughput |
+| `cached_blocks`, `draining` | |
 
 All fields are optional. The gateway merges reported usage with its own
-reservations made since the report, so a stale report never over-commits a
-worker. Engines without heartbeats are polled through Prometheus instead
-(`engine_state.poll.format: prometheus` with the `vllm` or `sglang` preset).
+reservations made since the report, so a stale report never over-commits an
+instance. Heartbeats carry the state; with `engine_state.poll` the gateway
+also asks every instance with `Engine.GetState` (static instances send no
+heartbeats). Polls only update the load; registration lives on heartbeats.
 
 ### 4.3 KV events and block hashing
 
@@ -583,10 +505,9 @@ list is hashed as is.
    `h(i) = xxh3_64( le_u64(h(i-1)) || le_u32(tok[i*B]) || ... || le_u32(tok[i*B+B-1]) )`.
 
 Engines that publish KV events (`kv_events` in heartbeats, or
-`POST /mwip/v1/kv_events {"worker_id": ..., "stored": [...]}`) must hash the
-same way over their expanded prompt. `stored` lists hashes of blocks that
-became resident, `removed` those evicted, `cleared` drops everything known
-about the worker.
+`Registry.PublishKVEvents`) must hash the same way over the prompt they
+run. `stored` lists hashes of blocks that became resident, `removed` those
+evicted, `cleared` drops everything known about the instance.
 
 ### 4.4 External KV metadata services
 

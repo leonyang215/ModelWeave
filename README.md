@@ -4,15 +4,15 @@
 
 ModelWeave sits between applications and a fleet of inference engines.
 Applications speak the OpenAI or Anthropic API. ModelWeave turns every
-request into one engine-neutral token list and picks the workers that should
-run it: it reuses their prefix cache, balances their load, and splits
-prefill, decode and media encoding across workers when that pays off. It
-drives the engines over vLLM's, SGLang's or its own protocol, and streams the
-answer back in the application's API.
+request into one engine-neutral token list and picks the engine instances
+that should run it: it reuses their prefix cache, balances their load, and
+splits prefill, decode and media encoding across instances when that pays
+off. It drives the engines through **mwip**, its own gRPC engine protocol,
+and streams the answer back in the application's API.
 
 It is two services with a strict division of labour. A stateless Rust
 **tokenizer** knows models: their prompt formats, special tokens and vision
-processors. A Go **gateway** knows the fleet: tenants, workers, caches and
+processors. A Go **gateway** knows the fleet: tenants, instances, caches and
 load. Engines generate and parse their own output.
 
 ## Highlights
@@ -21,18 +21,25 @@ load. Engines generate and parse their own output.
   model with a Hugging Face chat template are registered side by side from
   their Hugging Face files. Prompts match transformers' `apply_chat_template`
   token for token, and control tokens can only come from the template.
-- **Any engine.** The same gateway drives vLLM (token-in generate, KV and EC
-  connectors), SGLang (`/generate`, bootstrap PD) or engines that speak
-  ModelWeave's native protocol, mwip. The protocol is a startup option.
-- **Disaggregated serving.** Each request runs *normal* (one worker), *PD*
-  (prefill and decode on different workers, with push, bootstrap or pull KV
-  handshakes) or *EPD* (media encoded on encoder workers first). The mode is
+- **One engine protocol: mwip.** Engines implement a gRPC service defined in
+  [proto/](proto/modelweave/mwip/v1) and receive the intermediate state as
+  is: token IDs with media already expanded, the options to sample, and the
+  parsers to apply. Engine output comes back already parsed. Every engine
+  plugs in this way; there are no adapters for other engine APIs.
+- **Many models, instances by role.** Each served model has its own engine
+  instances, each in one role: encode, prefill, decode or unified. Instances
+  register with the gateway's mwip Registry by heartbeat. The gateway keeps
+  them per model and role, expires those whose heartbeats stop, and drains or
+  removes them one at a time while the others keep serving.
+- **Disaggregated serving.** Each request runs *normal* (one instance), *PD*
+  (prefill and decode on different instances, with push, bootstrap or pull KV
+  handshakes) or *EPD* (media encoded on encode instances first). The mode is
   decided per request from cache hits and prompt length, with retries and
   fallback.
 - **Prefix-cache-aware scheduling.** Images and video frames occupy pad values
   derived from their content, so block hashes cover multimodal prompts too.
   Caches are learned from routing, from engine KV events or from an external
-  index; load comes from heartbeats or the engines' Prometheus metrics.
+  index; load comes from heartbeats or `GetState` polls.
 - **Traffic control.** Tenants by API key with priorities, request and token
   rate limits, concurrency caps, a fair admission queue and overload
   shedding.
@@ -46,14 +53,14 @@ load. Engines generate and parse their own output.
 %%{init: {"flowchart": {"wrappingWidth": 360}}}%%
 flowchart LR
     client["<b>API clients</b><br/>OpenAI · Anthropic APIs<br/>streaming or not"]
-    gateway["<b>modelweave-gateway</b> (Go)<br/>tenant QoS · admission control<br/>cache- and load-aware scheduling<br/>normal · PD · EPD orchestration<br/>engine adapters · response formatting"]
-    workers["<b>Inference workers</b><br/>encode · prefill · decode · unified<br/>vLLM · SGLang · native mwip engines"]
+    gateway["<b>modelweave-gateway</b> (Go)<br/>tenant QoS · admission control<br/>cache- and load-aware scheduling<br/>normal · PD · EPD orchestration<br/>instance registry · response formatting"]
+    workers["<b>Engine instances</b><br/>per model: encode · prefill · decode · unified<br/>implementing mwip"]
     tokenizer["<b>modelweave-tokenizer</b> (Rust)<br/>DeepSeek V4 / V4.1 · Qwen3 · Qwen3-VL<br/>any Hugging Face chat template<br/>prompt → token list · media planning"]
 
     client <-->|"requests<br/>SSE or JSON"| gateway
-    gateway <-->|"generate (streaming)<br/>parsed deltas"| workers
+    gateway <-->|"mwip Generate (gRPC)<br/>parsed deltas"| workers
     gateway <-->|"POST /v1/render<br/>token list + options"| tokenizer
-    workers -.->|"heartbeats<br/>KV events · load"| gateway
+    workers -.->|"mwip Registry: heartbeats<br/>KV events · load"| gateway
 ```
 
 - **`modelweave-tokenizer`** (Rust) converts Chat Completions, Responses and
@@ -63,15 +70,17 @@ flowchart LR
   options engines need to generate and parse. The tokenizer is stateless and
   knows nothing about engines.
 - **`modelweave-gateway`** (Go) authenticates and admits requests, chooses
-  workers and orchestrates the execution mode. It adapts the intermediate
-  state to the engine protocol and formats the engines' parsed output for the
-  client, as SSE or as one JSON body.
-- **Workers** are inference engines in the roles encode, prefill, decode or
-  unified. They register with heartbeats (or are configured statically),
-  report load and KV events, and parse reasoning and tool calls themselves.
-- **`modelweave-mockengine`** simulates workers for all three protocols
-  (prefix cache, KV hand-off, encoders, timing and faults) for local runs and
-  tests.
+  instances of the requested model and orchestrates the execution mode. It
+  sends the intermediate state to the instances and formats their parsed
+  output for the client, as SSE or as one JSON body. It serves the mwip
+  Registry, where instances register.
+- **Engine instances** each serve one model in one role: encode, prefill,
+  decode or unified. They implement mwip ([docs/mwip.md](docs/mwip.md)),
+  register with heartbeats that carry their load and KV events, and parse
+  reasoning and tool calls themselves.
+- **`modelweave-mockengine`** simulates an engine instance for local runs and
+  tests: the mwip Engine service and the registration lifecycle, prefix
+  cache, KV hand-off, encoders, timing and faults.
 
 ### A request, step by step
 
@@ -82,9 +91,9 @@ sequenceDiagram
     participant C as Client
     participant G as Gateway
     participant T as Tokenizer
-    participant E as Encode worker
-    participant P as Prefill worker
-    participant D as Decode worker
+    participant E as Encode instance
+    participant P as Prefill instance
+    participant D as Decode instance
     C->>G: request with an image
     G->>T: POST /v1/render
     T-->>G: token list + options
@@ -101,10 +110,11 @@ sequenceDiagram
 
 The gateway renders the request once (2–3), admits and plans it, and has the
 image encoded (4–5). It then sends the decode and prefill legs, and the
-prefill worker pushes the KV the decode worker lacks (6–9). The decode worker
-streams parsed deltas, which the gateway formats for the client (10–11). A
-short prompt or a prefix-cache hit skips the prefill worker, so the decode
-worker runs the request alone; text-only requests skip the encoder.
+prefill instance pushes the KV the decode instance lacks (6–9). The decode
+instance streams parsed deltas, which the gateway formats for the client
+(10–11). A short prompt or a prefix-cache hit skips the prefill instance, so
+the decode instance runs the request alone; text-only requests skip the
+encode stage.
 
 ## Supported models
 
@@ -136,8 +146,8 @@ inference.
 
 ```sh
 make images   # build the tokenizer, gateway, mock engine and e2e images
-make up       # gateways on :38080 and :38081, tokenizer on :38090
-make e2e      # 44 end-to-end tests inside the compose network
+make up       # gateways on :38080 and :38081 (mwip Registry on :38082), tokenizer on :38090
+make e2e      # 41 end-to-end tests inside the compose network
 ```
 
 Behind a proxy, export `http_proxy`, `https_proxy` and `no_proxy` before
@@ -155,25 +165,33 @@ curl -s localhost:38080/v1/messages -H 'x-api-key: sk-team-a' \
 ```
 
 [deploy/compose/README.md](deploy/compose/README.md) describes the local
-stack (its models, workers and tenants) and has more requests to try.
+stack (its models, instances and tenants) and has more requests to try.
 
-## Running with real engines
+## Plugging in engines
 
-- Pick the engine protocol at startup with
-  `modelweave-gateway -config gateway.yaml -engine-protocol vllm` (or `sglang`,
-  `mwip`), or per model with `models[].engine_protocol`.
-- **vLLM**: start it with the model's reasoning and tool-call parsers (for
-  Qwen3, `--reasoning-parser qwen3 --tool-call-parser hermes`). PD uses the
-  MooncakeConnector (`bootstrap`) or the NixlConnector (`pull`); EPD uses an
-  EC-producer instance registered as an encode worker.
-- **SGLang**: PD uses bootstrap, and media are encoded inside SGLang
-  (`--encoder-urls`). Its `/generate` returns raw text, so use vLLM or mwip
-  when clients need parsed reasoning and tool calls.
-- Workers register with heartbeats (`POST /mwip/v1/heartbeat`) or are listed
-  in `discovery.workers`. Their load is read from heartbeats or scraped from
-  vLLM and SGLang Prometheus metrics, without engine changes.
+Engines plug in through mwip, and only through it. An engine instance:
 
-[docs/protocol.md](docs/protocol.md) has the fields of every protocol.
+1. serves the Engine service of
+   [proto/modelweave/mwip/v1](proto/modelweave/mwip/v1): `Generate`, plus
+   `Encode`, `Abort` and `GetState` as needed;
+2. registers with the gateway's Registry (`server.grpc_listen`, default
+   `:8081`) as one model in one role, and keeps heartbeating. An instance
+   whose heartbeats stop expires after `discovery.heartbeat_ttl`, and
+   `Deregister` removes it at once.
+
+There are no adapters for other engine APIs: an engine built on vLLM,
+SGLang or another framework plugs in by serving the Engine service in front
+of it. [docs/mwip.md](docs/mwip.md) explains the protocol, and
+[examples/python-engine](examples/python-engine) is a minimal Python engine
+that runs against the local stack:
+
+```sh
+cd examples/python-engine && pip install -r requirements.txt
+python -m grpc_tools.protoc -I ../../proto --python_out=gen --grpc_python_out=gen ../../proto/modelweave/mwip/v1/*.proto
+MW_CONTROL_TOKEN=local-control-token python engine.py --registry 127.0.0.1:38082 \
+  --target $(docker network inspect modelweave_default -f '{{(index .IPAM.Config 0).Gateway}}'):50051 \
+  --model external-engine --id py-0
+```
 
 ## Building from source
 
@@ -183,20 +201,25 @@ Go 1.26+ and Rust 1.88+:
 make build   # bin/modelweave-gateway, bin/modelweave-tokenizer, bin/modelweave-mockengine
 make test    # Go tests with the race detector, Rust tests (incl. golden prompts from transformers)
 make lint    # gofmt, rustfmt, clippy
+make proto   # regenerate api/mwip/v1 from proto/ (protoc, protoc-gen-go, protoc-gen-go-grpc)
 
 bin/modelweave-tokenizer --config configs/tokenizer.example.toml --listen 127.0.0.1:8090
-bin/modelweave-gateway -config configs/gateway.example.yaml -engine-protocol vllm
+bin/modelweave-gateway -config configs/gateway.example.yaml
 ```
 
 ## Documentation
 
+- [docs/mwip.md](docs/mwip.md): mwip, the engine protocol: models, roles and
+  instances, the Engine and Registry services, the Generate stream, errors,
+  the lifecycle of an instance, implementing an engine
 - [docs/architecture.md](docs/architecture.md): components, request
   lifecycle, model registry, execution modes, scheduling, QoS, package map
 - [docs/protocol.md](docs/protocol.md): the intermediate state, media planning
-  per model family, engine protocols, PD and EPD per protocol, control plane
+  per model family, the engine protocol, PD and EPD, control plane
 - [docs/observability.md](docs/observability.md): metrics, logs, example
   queries
 - [deploy/compose/README.md](deploy/compose/README.md): the local stack
+- [examples/python-engine](examples/python-engine): an mwip engine in Python
 - [README.zh.md](README.zh.md): 中文说明
 
 ## Acknowledgements

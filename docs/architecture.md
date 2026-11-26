@@ -4,9 +4,9 @@ ModelWeave is two processes plus the engines they drive:
 
 | Process | Language | Role |
 |---|---|---|
-| `modelweave-gateway` | Go | API front (OpenAI Chat Completions / Responses, Anthropic Messages, streaming or not), auth and tenant QoS, admission queue and overload shedding, worker registry, cache- and load-aware scheduling, normal / PD / EPD orchestration, **engine protocol adapters** (mwip, vLLM, SGLang), retries and fallback, **response formatting**, metrics and access logs |
+| `modelweave-gateway` | Go | API front (OpenAI Chat Completions / Responses, Anthropic Messages, streaming or not), auth and tenant QoS, admission queue and overload shedding, **instance registry** (the mwip Registry, gRPC: instances of every model by role, heartbeats, expiry, draining), cache- and load-aware scheduling, normal / PD / EPD orchestration, the **mwip** client (gRPC), retries and fallback, **response formatting**, metrics and access logs |
 | `modelweave-tokenizer` | Rust | **protocol conversion and tokenization only**, for every registered model at once: API request → the intermediate state (the conversation rendered into one token list by the model's prompt format, images and videos already expanded to their pad-value positions, generation and parsing options) |
-| workers | any | engines in roles encode (E), prefill (P), decode (D) or unified, called with one of three protocols: the intermediate state as is (`mwip`), vLLM's token-in generate, or SGLang's `/generate`. They detokenize and **parse** their output. `modelweave-mockengine` simulates them (all three protocols at once) for tests |
+| engine instances | any | one model in one role each: encode (E), prefill (P), decode (D) or unified. They implement **mwip**, the gRPC protocol of [proto/modelweave/mwip/v1](../proto/modelweave/mwip/v1) ([mwip.md](mwip.md)), the only way engines integrate; they detokenize and **parse** their output. `modelweave-mockengine` simulates them for tests |
 
 The tokenizer serves several model families side by side (§ Tokenizer
 internals): DeepSeek V4 / V4.1 prompts are rendered with
@@ -17,13 +17,13 @@ controls, frame sampling) follows each model's own processor.
 
 ```
                  ┌──────────────────────────────── modelweave-gateway ────────────────────────────────┐
- client ──HTTP──▶│ api ─▶ render ─▶ QoS ─▶ overload ─▶ encode ─▶ plan+queue ─▶ execute ──────▶ format   │──▶ workers
- (stream or not) │          │      limiter  L0–L4        (E)   scheduler   (orchestrator)    (SSE|JSON) │   mwip | vllm | sglang
+ client ──HTTP──▶│ api ─▶ render ─▶ QoS ─▶ overload ─▶ encode ─▶ plan+queue ─▶ execute ──────▶ format  │──▶ instances
+ (stream or not) │          │      limiter  L0–L4        (E)   scheduler   (orchestrator)    (SSE|JSON)│   mwip Engine (gRPC)
                  │          ▼                                     ▲              │                     │   (always streaming)
-                 │   modelweave-tokenizer         registry ◀── heartbeats / pollers                    │
+                 │   modelweave-tokenizer         registry ◀── mwip Registry heartbeats / GetState     │
                  │   (unary /v1/render)           kvindex  ◀── routing / KV events                     │
-                 │                                                engine adapters: intermediate state  │
-                 │                                                → mwip / vLLM / SGLang request       │
+                 │                                                engine client: the intermediate      │
+                 │                                                state as an mwip GenerateRequest     │
                  └────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -33,9 +33,9 @@ Who does what:
   positions every image and video takes, from the caller's metadata and pixel
   controls, but nothing about engines. It is out of the output path
   (stateless, unary);
-* the **gateway** chooses how to call engines — the engine protocol is a
-  startup option — and adapts the intermediate state to it, with PD and EPD
-  expressed in each protocol's own fields (protocol §2);
+* the **gateway** schedules every request over the instances of its model,
+  per role, and sends them the intermediate state as is, with PD and EPD in
+  the request's `disagg` and media artifacts (protocol §2);
 * the **engine** applies stop strings, detokenizes and parses reasoning and
   tool calls, streaming parsed deltas;
 * the **gateway** never parses: it relays the deltas through a formatter that
@@ -53,9 +53,7 @@ Who does what:
    (every media position holding its pad value), the media items with their
    plans and placements, and the conversation, inference and parsing options
    (protocol §1). Invalid requests come back already shaped as the protocol's
-   error body and are returned unchanged. Media a model has no placeholder
-   for (DeepSeek V4.1 videos) are rejected here (400) when the model is served
-   over vLLM or SGLang, which expand media themselves.
+   error body and are returned unchanged.
 3. **Prefix hashes.** The token list is hashed as is into chained 64-token
    block hashes (`internal/kvindex`, protocol §4.3).
 4. **Tenant QoS.** RPM / TPM token buckets and a concurrency cap per tenant
@@ -67,45 +65,59 @@ Who does what:
    L0–L4 with hysteresis; a priority matrix admits, drops probabilistically or
    rejects (**503 + Retry-After**). Requests whose prefix is mostly cached are
    exempt from drops (they are cheap).
-6. **Encode (EPD).** If the prompt has media, the model has encoders and the
-   engine protocol encodes outside the engine (mwip, vllm), every item is
-   encoded on an E worker (parallel, retried on other encoders): mwip builds
-   content-addressed artifacts (cached; one per placement), vLLM's EC producer
-   returns `ec_transfer_params`. No P/D capacity is held meanwhile. SGLang
-   encodes inside the engine.
+6. **Encode (EPD).** If the prompt has media and the model has encoders,
+   every item is encoded on an E instance (`Engine.Encode`, parallel,
+   retried on other encoders), which builds content-addressed artifacts
+   (cached; one per placement). No P/D capacity is held meanwhile.
 7. **Plan + admission queue** (`internal/orchestrator/plan.go`). The planner
    picks the execution mode and reserves workers. When no worker has capacity
    the request waits in the model's admission queue (strict priority classes,
    VTC fair sharing between tenants, backfill, shedding of lower priorities,
    deadline → 503).
 8. **Execute** (`internal/orchestrator/execute.go`). Run the plan. The engine
-   adapters (`internal/engine`) turn each stage into a streaming call in the
-   model's engine protocol and translate its stream (mwip NDJSON, vLLM or
-   SGLang SSE) into events (accepted, prefill done, delta, finish). Deltas go
+   client (`internal/engine`) turns each stage into an mwip `Generate` call
+   and reads its stream as events (accepted, prefill done, delta, finish,
+   error). Deltas go
    through the formatter (`internal/format`) straight to the client: SSE
    chunks for streaming clients, one JSON body at the end for the others.
 9. **Finish.** Release reservations, reconcile TPM, record the session's decode
    worker, emit metrics and one structured access-log line.
 
-## Engine protocols
+## Engines and instances
 
-`engine.protocol` (default `mwip`), the startup option
-`-engine-protocol` / `MW_ENGINE_PROTOCOL` (replaces it) and
-`models[].engine_protocol` (wins) select how a model's workers are called:
+Engines integrate through **mwip** only ([mwip.md](mwip.md), protocol §2):
+an instance serves the gRPC `modelweave.mwip.v1.Engine` service at its
+`target`, receives the intermediate state with the call's `disagg`, and
+streams parsed output. There are no adapters for other engine APIs; an
+engine built on another serving framework serves the Engine service in
+front of it.
 
-| | `mwip` | `vllm` | `sglang` |
-|---|---|---|---|
-| endpoint | `POST /mwip/v1/generate` | `POST /inference/v1/generate` | `POST /generate` |
-| request | the intermediate state + `disagg` | token in, media collapsed to the model's placeholders + `content_parts`, `output_mode: derender` | `input_ids`, `image_data`, `video_data` |
-| PD handshakes | push, bootstrap, pull | push (extension), bootstrap (Mooncake), pull (Nixl) | bootstrap |
-| encode stage | gateway, `/mwip/v1/encode`, cached artifacts | gateway, EC producer → `ec_transfer_params` | inside the engine |
-| videos | yes | with a video placeholder (Qwen3-VL); DeepSeek V4.1: 400 | same as vllm |
-| output | parsed by the engine | parsed by the engine | raw text |
+The gateway serves many models; each model has its own instances, one model
+in one role each. The registry (`internal/registry`) indexes them by model
+and role, and every scheduling pass asks for the candidates of one model and
+role: unified and normal-capable decode instances for normal requests,
+prefill and decode instances for PD, encode instances for the E stage.
 
-Workers do not declare a protocol; the mock engine serves all three, so the
-same workers can be driven by gateways started with different options
-(`deploy/compose`: `gateway` speaks mwip, `gateway-events` runs with
-`-engine-protocol vllm`).
+### Registration and lifecycle
+
+Instances register through the **mwip Registry**, a gRPC service the
+gateway serves on `server.grpc_listen` (protocol §4.1):
+
+* a `Heartbeat` describes one instance (id, model, role, target, capacity
+  hints) with its `EngineState`, KV events and draining flag; an invalid one
+  is rejected with the reason (`INVALID_ARGUMENT`, `NOT_FOUND`);
+* an instance whose heartbeats stop expires after `discovery.heartbeat_ttl`
+  (a sweep every second); `Deregister` removes it at once; its next
+  heartbeat registers it again;
+* `draining` in its heartbeats, or an operator's
+  `POST /admin/workers/{id}/drain`, stops new requests (the two are
+  independent: heartbeats do not undo an operator's drain);
+* removing an instance forgets its prefix-cache index entries and session
+  affinities; `modelweave_instance_removals_total` counts removals by model,
+  role and reason (`deregistered`, `expired`).
+
+Static instances (`discovery.workers`) are configured with the same fields;
+they never expire, and `engine_state.poll` gets their load with `GetState`.
 
 ## Execution modes
 
@@ -129,17 +141,13 @@ request (`planAuto`):
 
 ### PD handshakes
 
-The orchestrator implements three rendezvous styles (protocol §2.5), selected
-per model with `pd.handshake` (default push for mwip, bootstrap for vllm and
-sglang), and expressed in each protocol's own fields:
+The orchestrator implements three rendezvous styles (protocol §2.3), selected
+per model with `pd.handshake` (default push), in the calls' `disagg`:
 
 * **bootstrap**: P and D are sent concurrently with a shared room; D fetches
-  KV from P's bootstrap server — mwip `disagg.prefill.bootstrap_addr`, SGLang
-  `bootstrap_host/port/room`, vLLM MooncakeConnector `kv_transfer_params`
-  (`transfer_id`, `remote_bootstrap_addr`, `remote_engine_id`).
-* **pull**: P runs first and returns a KV handle — mwip `prefill_done` with a
-  `kv_handle`, vLLM NixlConnector `kv_transfer_params` on P's stream — which D
-  uses to pull the KV.
+  KV from P's bootstrap server (`disagg.prefill.bootstrap_addr`).
+* **pull**: P runs first and ends with `prefill_done` carrying a
+  `kv_handle`, which D uses to pull the KV.
 * **push** (Mooncake-style): D registers and acknowledges with its KV receiver
   and the length of the prefix it already caches; only then is P sent, and P
   pushes the missing KV to D.
@@ -165,10 +173,9 @@ pair (`retry.whole_retries`).
   never replayed.
 * Each attempt has its own id, used as the engine request id and as the
   pairing token of P and D.
-* Client disconnects and timeouts abort the engines (connection close plus a
-  best-effort abort in the engine's protocol: `/mwip/v1/abort`,
-  `/inference/v1/abort_requests` or SGLang `/abort_request`). Stop strings are
-  the engine's job: it stops itself.
+* Client disconnects and timeouts abort the engines (the call is canceled,
+  plus a best-effort `Engine.Abort`). Stop strings are the engine's job: it
+  stops itself.
 
 ### Reservations
 
@@ -215,7 +222,7 @@ Policies (per role, `routing.<role>.policy`):
 | Type | Source of truth |
 |---|---|
 | `approx` | learned from routing decisions, bounded per worker by its KV capacity, with TTL |
-| `events` | engine KV events (`stored` / `removed` / `cleared`) from heartbeats or `POST /mwip/v1/kv_events`; short optimistic entries bridge the gap until the event arrives |
+| `events` | engine KV events (`stored` / `removed` / `cleared`) from Registry heartbeats or `PublishKVEvents`; short optimistic entries bridge the gap until the event arrives |
 | `remote` | an external KV metadata service (`POST /v1/prefix/match`), falling back to `approx` on error |
 | `none` | cache-blind |
 
@@ -223,14 +230,13 @@ Since media positions hold pad values derived from the media digest, the same
 image or video frame yields the same blocks in every request: prefix caching
 covers multimodal prompts without extra steps.
 
-### Engine-state adapters
+### Engine state
 
-* **push:** MWIP heartbeats carry `EngineState` (running/waiting requests, KV
-  used/capacity, prefill queue, throughput) and register workers dynamically.
-* **pull:** `engine_state.poll` scrapes each worker: MWIP `GET /mwip/v1/state`, or
-  Prometheus `/metrics` mapped with the `vllm`, `sglang` or `modelweave`
-  presets (or explicit metric names), so engines without MWIP heartbeats still
-  inform the scheduler.
+* **push:** Registry heartbeats carry `EngineState` (running/waiting
+  requests, KV used/capacity, prefill queue, throughput).
+* **pull:** `engine_state.poll` asks every instance with `Engine.GetState`,
+  so static instances, which send no heartbeats, still inform the scheduler.
+  Polls update the load only: registration lives on heartbeats.
 
 State older than `engine_state.stale_after` is ignored; the gateway's own
 reservations always apply.
@@ -311,22 +317,24 @@ tokens), and ends broken streams with the protocol's error event.
 
 | Path | Content |
 |---|---|
-| `cmd/modelweave-gateway` | gateway binary (`-config`, `-engine-protocol`) |
-| `cmd/modelweave-mockengine` | mock worker binary |
-| `internal/gateway` | HTTP handlers, request lifecycle, control plane, metrics collectors |
+| `proto/modelweave/mwip/v1` | **mwip**, the engine protocol: the intermediate state, the Engine and Registry services ([mwip.md](mwip.md)) |
+| `api/mwip/v1` | Go code generated from the proto (`make proto`) |
+| `cmd/modelweave-gateway` | gateway binary (`-config`) |
+| `cmd/modelweave-mockengine` | mock engine binary (one instance) |
+| `internal/gateway` | HTTP handlers, request lifecycle, the mwip Registry service, admin API, metrics collectors |
 | `internal/format` | client response formatting (Chat Completions, Responses, Messages; SSE or JSON) |
 | `internal/orchestrator` | planning, execution, PD handshakes, encode stage, artifact cache, session map |
 | `internal/scheduler` | scheduling passes and policies |
 | `internal/kvindex` | block hashing, approximate / event / remote prefix indexes |
-| `internal/registry` | workers, engine state, reservations, passive health |
-| `internal/enginestate` | engine-state pollers (MWIP, Prometheus presets) |
+| `internal/registry` | instances by model and role, heartbeat expiry, draining, engine state, reservations, passive health |
+| `internal/enginestate` | the `Engine.GetState` poller |
 | `internal/qos` | token buckets, tenant limiter, admission queue, overload controller |
 | `internal/tokenizer` | tokenizer client (unary render, failover between replicas) |
-| `internal/engine` | engine protocol adapters: mwip, vLLM `/inference/v1/generate`, SGLang `/generate`; always streaming; PD and EPD fields; encode, abort |
-| `internal/mwip` | the intermediate state, the native engine protocol, the control plane |
-| `internal/wire` | vLLM and SGLang wire types and the `modelweave` extension |
-| `internal/mockengine` | simulated worker serving all three protocols, generating and parsing the markup of its model (DeepSeek DSML, Qwen `<think>` and hermes tool calls) |
+| `internal/engine` | the mwip client over gRPC (one connection per target): `Generate` (always streaming), `Encode`, `Abort`, `GetState`; error classification |
+| `internal/mwip` | the intermediate state and engine events in memory, and their conversion to and from the mwip proto messages |
+| `internal/mockengine` | simulated engine, one instance per process: the mwip Engine service, the registration lifecycle (heartbeats, draining, deregistration, KV resync) with test controls; generates and parses the markup of its model (DeepSeek DSML, Qwen `<think>` and hermes tool calls) |
 | `internal/obs` | logging and Prometheus metrics |
 | `tokenizer/` | Rust tokenizer service: model registry, DeepSeek and chat-template renderers, protocol conversion, media planning |
+| `examples/python-engine` | a minimal Python engine implementing mwip from the proto |
 | `deploy/compose` | local DeepSeek V4.1 / Qwen3 / Qwen3-VL stack with mock engines, Prometheus, e2e runner |
 | `test/e2e` | end-to-end tests |

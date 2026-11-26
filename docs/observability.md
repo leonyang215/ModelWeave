@@ -28,7 +28,7 @@ open http://127.0.0.1:39090
 | `modelweave_tokenizer_unreachable_total` | counter | endpoint | tokenizer replicas that could not be reached; the render moved on to the next replica, which is skipped for 5 s |
 | `modelweave_media_items_total` | counter | model, modality | images and videos in rendered requests (`image`, `video`) |
 | `modelweave_media_tokens_total` | counter | model, modality | prompt positions taken by media: pad-value tokens, plus timestamp text for videos |
-| `modelweave_model_info` | gauge | model, engine_protocol, mode, handshake, gateway_encode | 1 per served model: the engine protocol chosen by `engine.protocol`, the `-engine-protocol` startup option or the model's `engine_protocol`; `gateway_encode="false"` when encoding is engine-managed (SGLang) |
+| `modelweave_model_info` | gauge | model, mode, handshake | 1 per served model: its mode and PD handshake |
 
 ### Scheduling and execution
 
@@ -42,7 +42,7 @@ open http://127.0.0.1:39090
 | `modelweave_execution_plans_total` | counter | model, mode, reason | plans by mode (`normal`, `pd`; `epd_` prefix after a gateway encode stage) and reason (`short_prompt`, `prefix_hit`, `session`, `unified`, `long_prompt`, `partial_hit`, `fallback`, `forced`, ...) |
 | `modelweave_fallbacks_total` | counter | model, from, to, reason | normal → pd fallbacks (`reason` is the error code, e.g. `normal_rejected`) |
 | `modelweave_retries_total` | counter | model, stage, reason | retries before the first token (`decode`, `prefill`, `encode`) |
-| `modelweave_engine_requests_total` | counter | model, role, protocol | calls sent to workers by role (`encode`, `prefill`, `decode`, `unified`) and engine protocol (`mwip`, `vllm`, `sglang`); generate calls always stream, encode calls are unary |
+| `modelweave_engine_requests_total` | counter | model, role | mwip calls sent to instances by role (`encode`, `prefill`, `decode`, `unified`); Generate calls always stream, Encode calls are unary |
 | `modelweave_upstream_errors_total` | counter | model, role, code | worker errors by error code |
 | `modelweave_aborts_total` | counter | model, reason | engine requests aborted by the gateway (`client_gone`, `timeout`, `stopped`, `error`); stop strings are handled inside engines and do not abort |
 | `modelweave_embedding_artifact_lookups_total` | counter | model, result | E-stage artifact cache (`hit`, `miss`, `invalidated`) |
@@ -74,9 +74,13 @@ time from the registry:
 | `modelweave_worker_state_age_seconds` | age of the last state report |
 | `modelweave_worker_completed_total`, `modelweave_worker_errors_total` | lifetime counters |
 
-Also: `modelweave_heartbeats_total{result}`, `modelweave_kv_events_total{kind}`,
-`modelweave_engine_state_polls_total{format,outcome}`, `modelweave_build_info`,
-and the Go runtime/process collectors.
+Also: `modelweave_heartbeats_total{result}` (mwip Registry heartbeats:
+`registered`, `updated`, `rejected`),
+`modelweave_instance_removals_total{model,role,reason}` (instances leaving the
+registry: `deregistered` by `Registry.Deregister`, `expired` without a
+heartbeat for `discovery.heartbeat_ttl`), `modelweave_kv_events_total{kind}`,
+`modelweave_engine_state_polls_total{outcome}` (`Engine.GetState`),
+`modelweave_build_info`, and the Go runtime/process collectors.
 
 ## Tokenizer metrics
 
@@ -95,13 +99,14 @@ and the engines.
 | `modelweave_tokenizer_model_info` | gauge | model, family, reasoning_parser, tool_call_parser | one series per registered model (`none` for a missing parser) |
 | `modelweave_tokenizer_build_info` | gauge | version, models | build information and the registered model names (comma-separated) |
 
-The mock engine exposes `mwip_engine_*` gauges (running, waiting, KV used and
-capacity, prefill queue, cached blocks) — the same names the gateway's
-`modelweave` polling preset reads — and
-`mock_engine_generate_requests_total{protocol}`; `GET /mock/stats` returns
-its counters (generate calls by protocol and streaming, encode calls by
-protocol, embeddings verified or loaded through `ec_transfer_params`, media
-it encoded itself) and the body of the last call it received.
+The mock engine (one instance) exposes `mwip_engine_*` gauges (running,
+waiting, KV used and capacity, prefill queue, cached blocks) and
+`mock_engine_generate_requests_total`; `GET /mock/stats` returns its counters
+(Generate and Encode calls, embedding artifacts verified, media it encoded
+itself) and the last Generate request (in its JSON form, with proto field
+names). `GET /mock/registration` returns its registration, and
+`POST /mock/registration/{pause,leave,resume,drain,undrain}` steers it for
+tests.
 
 ## Logs
 
@@ -114,18 +119,18 @@ The gateway writes one `request` line per API request (slog JSON):
  "attempts":1,"fallback":"","prompt_tokens":1970,"completion_tokens":25,"reasoning_tokens":0,
  "predicted_cached_tokens":0,"engine_cached_tokens":0,"finish_reason":"stop",
  "admission":"admitted","queued":false,"tokenize_ms":0.927,"queue_ms":0,
- "images":0,"videos":1,"engine_protocol":"mwip","encode_ms":70.792,"encoded_items":1,"artifact_hits":0,
+ "images":0,"videos":1,"encode_ms":70.792,"encoded_items":1,"artifact_hits":0,
  "register_ms":0.765,"prefill_ms":102.745,"ttft_ms":175.28,"e2e_ms":251.574}
 ```
 
 `predicted_cached_tokens` is the scheduler's estimate; `engine_cached_tokens`
 is what the engine reported — comparing the two shows how accurate the prefix
 index is. Failed requests add `error_kind` and `error`. Status 5xx and
-mid-stream errors log at WARN. Other gateway logs cover the engine protocol of every
-model at startup (`model configured`, and a note when encoding is
-engine-managed), worker registration and removal, heartbeat expiry,
-ejections, retries and fallbacks; all carry `request_id` or `worker` where
-relevant.
+mid-stream errors log at WARN. Other gateway logs cover every model at
+startup (`model configured`), the mwip Registry address (`mwip_registry`),
+instances joining and leaving the registry (`worker added`, `worker removed`,
+`instance expired: no heartbeat`), ejections, retries and fallbacks; all
+carry `request_id` or `worker` where relevant.
 
 The tokenizer logs (tracing JSON) one `model loaded` line per registered
 model at startup (name, aliases, family, context window, parsers,
@@ -144,10 +149,13 @@ request can be followed across the gateway, tokenizer and engines.
 sum by (mode) (rate(modelweave_requests_total[1m]))
 sum by (stream) (rate(modelweave_requests_total[1m]))
 
-# Engine calls by protocol and role (generate calls all streaming)
-sum by (protocol, role) (rate(modelweave_engine_requests_total[1m]))
+# Engine calls by model and role (Generate calls all streaming)
+sum by (model, role) (rate(modelweave_engine_requests_total[1m]))
 
-# Which engine protocol each model runs with (startup option / config)
+# Instances that expired (lost heartbeats) in the last hour, per model and role
+sum by (model, role) (increase(modelweave_instance_removals_total{reason="expired"}[1h]))
+
+# The mode and PD handshake of each model
 modelweave_model_info
 
 # What the tokenizer serves, and its load and latency per model
