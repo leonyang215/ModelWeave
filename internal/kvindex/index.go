@@ -12,6 +12,9 @@ type Query struct {
 	BlockSize  int
 	Blocks     []uint64 // chained block hashes of the prompt (see BlockHashes)
 	Candidates []string // worker IDs
+	// WorkerKeys optionally scopes each instance ID to a registration epoch.
+	// External metadata services still receive the original instance IDs.
+	WorkerKeys map[string]string
 }
 
 // Index is the cache-awareness adapter used by the scheduler. Implementations
@@ -33,7 +36,7 @@ type Index interface {
 
 // EventSink receives KV cache events published by engines (MWIP kv_events).
 type EventSink interface {
-	ApplyEvents(worker string, batch EventBatch)
+	ApplyEvents(worker string, batch EventBatch) error
 }
 
 // EventBatch is a batch of KV cache events from one worker.
@@ -61,7 +64,7 @@ func NewApprox(ttl time.Duration, defaultCapacityBlocks int) *Approx {
 func (a *Approx) Kind() string { return "approx" }
 
 func (a *Approx) Match(_ context.Context, q Query) (map[string]int, error) {
-	return a.idx.Match(q.Blocks, q.Candidates), nil
+	return matchKeys(q, a.idx.Match), nil
 }
 
 func (a *Approx) Observe(worker string, blocks []uint64) { a.idx.Insert(worker, blocks) }
@@ -90,9 +93,9 @@ func NewEvents(optimisticTTL time.Duration) *Events {
 func (e *Events) Kind() string { return "events" }
 
 func (e *Events) Match(_ context.Context, q Query) (map[string]int, error) {
-	out := e.exact.Match(q.Blocks, q.Candidates)
+	out := matchKeys(q, e.exact.Match)
 	if e.optimistic != nil {
-		for w, n := range e.optimistic.Match(q.Blocks, q.Candidates) {
+		for w, n := range matchKeys(q, e.optimistic.Match) {
 			if n > out[w] {
 				out[w] = n
 			}
@@ -117,7 +120,7 @@ func (e *Events) ForgetWorker(worker string) {
 func (e *Events) SetWorkerCapacity(string, int) {}
 
 // ApplyEvents updates the exact index.
-func (e *Events) ApplyEvents(worker string, batch EventBatch) {
+func (e *Events) ApplyEvents(worker string, batch EventBatch) error {
 	if batch.Cleared {
 		e.exact.Clear(worker)
 		if e.optimistic != nil {
@@ -133,6 +136,7 @@ func (e *Events) ApplyEvents(worker string, batch EventBatch) {
 	if len(batch.Stored) > 0 {
 		e.exact.Insert(worker, batch.Stored)
 	}
+	return nil
 }
 
 // Sweep expires optimistic entries.
@@ -154,3 +158,19 @@ func (None) Match(_ context.Context, q Query) (map[string]int, error) { return m
 func (None) Observe(string, []uint64)                                 {}
 func (None) ForgetWorker(string)                                      {}
 func (None) SetWorkerCapacity(string, int)                            {}
+
+func matchKeys(q Query, match func([]uint64, []string) map[string]int) map[string]int {
+	keys := make([]string, len(q.Candidates))
+	for i, id := range q.Candidates {
+		keys[i] = id
+		if key := q.WorkerKeys[id]; key != "" {
+			keys[i] = key
+		}
+	}
+	m := match(q.Blocks, keys)
+	out := make(map[string]int, len(keys))
+	for i, id := range q.Candidates {
+		out[id] = m[keys[i]]
+	}
+	return out
+}

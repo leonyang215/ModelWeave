@@ -29,6 +29,8 @@ auth:
   anonymous_tenant: anonymous       # tenant of keyless requests when auth is disabled
 
 # Tenants are identified by API key (Authorization: Bearer <key> or x-api-key).
+# Limits apply to this gateway in memory mode, or to the entire Redis
+# namespace in distributed mode (not multiplied by the number of replicas).
 tenants:
   - name: team-a
     api_keys: ["sk-team-a"]
@@ -50,6 +52,20 @@ discovery:
   #    bootstrap_addr: "10.0.0.5:8998", engine_id: "p0-engine"}           # bootstrap handshake
   # - {id: d0, model: deepseek-v4.1, role: decode, target: "10.0.0.6:9001", normal: true,
   #    kv_capacity_tokens: 1048576, max_running_requests: 256}          # also runs normal requests
+
+# State backend: memory needs no external service. Switch to redis for
+# multiple gateways; use the same namespace/heartbeat TTL/block size on all.
+# Registry, reports, drains, health, reservations, prefix index, sessions and
+# embedding-artifact metadata, tenant quotas and admission queues are shared.
+# No separate QoS switch: state.backend selects the complete implementation.
+state:
+  backend: memory                    # memory | redis
+  sync_interval: 250ms               # refresh membership even without requests
+  redis:
+    url: ""                         # redis://user:password@host:6379/0 or rediss://...; supports ${ENV}
+    namespace: modelweave             # isolate independent fleets in one Redis
+    timeout: 1s
+    lease_ttl: 15s                    # reclaim a crashed gateway's reservations; >= 3*timeout
 
 engine_state:
   stale_after: 10s                  # ignore engine state older than this
@@ -100,22 +116,23 @@ models:
       output_tokens: 1024           # output tokens reserved on decode (prompt + min(max_tokens, this))
       block_size: 64                # round KV reservations to blocks
       uncached_beta: 0              # prefill cost w = u*(1+beta*(cached+u/2)); 0 = plain tokens
-    routing:                        # policy per role: cache_aware | weighted | least_load
-      prefill:                      #   | power_of_two | round_robin | random | session_affinity
-        policy: cache_aware
-        cache_threshold: 0.3
-        balance_abs_threshold: 32768 # queued prefill tokens
-        balance_rel_threshold: 1.5
+    routing:                        # registered policy per role (docs/state-and-scheduling.md)
+      prefill:
+        policy: weighted             # default: prefix-cache=1, load=1; higher total score wins
+        scorers:
+          - {name: prefix-cache, weight: 2}
+          - {name: load, weight: 1}
       decode:
-        policy: cache_aware
-        cache_threshold: 0.3
-        balance_abs_threshold: 32   # running requests
+        policy: weighted
+        scorers:
+          - {name: prefix-cache, weight: 1}
+          - {name: load, weight: 1}
       unified:
-        policy: cache_aware
+        policy: weighted
       encode:
-        policy: least_load
+        policy: load                 # load-only scorer; also supports least_load, round_robin, etc.
     admission:
-      queue_size: 512               # requests waiting for capacity
+      queue_size: 512               # waiting requests per model (global in Redis mode)
       max_wait: 30s
       backfill_depth: 4             # let smaller requests use capacity a large one cannot
       overload:                     # utilization-level shedding by priority

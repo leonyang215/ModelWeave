@@ -9,6 +9,23 @@ import (
 	"github.com/leonyang215/ModelWeave/internal/mwip"
 )
 
+// ArtifactStore and SessionStore select local or shared advisory caches.
+// A backend error is a cache miss, never permission to skip capacity checks.
+type ArtifactStore interface {
+	Get(string) ([]mwip.EmbeddingArtifact, bool)
+	Put(string, []mwip.EmbeddingArtifact)
+	Invalidate(...string)
+	Len() int
+}
+
+type SessionStore interface {
+	Get(string) (string, bool)
+	Set(string, string)
+	Delete(string)
+	ForgetWorker(string)
+	Len() int
+}
+
 // ArtifactCache maps media digests to the embedding artifacts the encode
 // stage built for them (one per placement: an image, or each kept frame of
 // a video). Artifacts are content addressed, so a hit can be reused by any

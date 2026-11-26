@@ -4,6 +4,7 @@ import (
 	"container/list"
 	"context"
 	"errors"
+	"math"
 	"sync"
 	"time"
 )
@@ -91,15 +92,7 @@ type waiter struct {
 
 // NewQueue starts a queue and its dispatcher goroutine.
 func NewQueue(cfg QueueConfig, observer QueueObserver) *Queue {
-	if cfg.MaxSize <= 0 {
-		cfg.MaxSize = 1024
-	}
-	if cfg.MaxWait <= 0 {
-		cfg.MaxWait = 30 * time.Second
-	}
-	if cfg.Tick <= 0 {
-		cfg.Tick = 25 * time.Millisecond
-	}
+	cfg = normalizeQueueConfig(cfg)
 	q := &Queue{
 		cfg:      cfg,
 		observer: observer,
@@ -113,6 +106,22 @@ func NewQueue(cfg QueueConfig, observer QueueObserver) *Queue {
 	q.wg.Add(1)
 	go q.run()
 	return q
+}
+
+func normalizeQueueConfig(cfg QueueConfig) QueueConfig {
+	if cfg.MaxSize <= 0 {
+		cfg.MaxSize = 1024
+	}
+	if cfg.MaxWait <= 0 {
+		cfg.MaxWait = 30 * time.Second
+	}
+	if cfg.Tick <= 0 {
+		cfg.Tick = 25 * time.Millisecond
+	}
+	if cfg.BackfillDepth < 0 {
+		cfg.BackfillDepth = 0
+	}
+	return cfg
 }
 
 // Close stops the dispatcher; waiting requests fail with ErrClosed.
@@ -143,6 +152,23 @@ func (q *Queue) Len() int {
 	return q.size + q.occupiedByTurnLocked()
 }
 
+func (q *Queue) LenContext(ctx context.Context) (int, error) {
+	s, err := q.StatsContext(ctx)
+	return s.Total, err
+}
+func (q *Queue) StatsContext(ctx context.Context) (QueueStats, error) {
+	if err := ctx.Err(); err != nil {
+		return QueueStats{}, err
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	s := QueueStats{Total: q.size + q.occupiedByTurnLocked(), Depth: q.depth}
+	if q.occupiedByTurnLocked() > 0 {
+		s.Depth[q.current.prio]++
+	}
+	return s, nil
+}
+
 // occupiedByTurnLocked is 1 when the waiter in turn still holds its place.
 func (q *Queue) occupiedByTurnLocked() int {
 	if q.current != nil && !q.current.shedPending {
@@ -164,9 +190,33 @@ type Ticket struct {
 // itself when it is its turn and must reserve capacity atomically: it returns
 // true when the request got its resources.
 func (q *Queue) Wait(ctx context.Context, t Ticket, try func() bool) error {
-	if t.Weight <= 0 {
+	w := newWaiter(t)
+	if err := ctx.Err(); err != nil {
+		q.outcome(w, "canceled")
+		return err
+	}
+	if err := q.enqueue(w); err != nil {
+		q.outcome(w, "full")
+		return err
+	}
+	return q.wait(ctx, w, func(context.Context) (Attempt, error) { return Attempt{Ready: try()}, nil })
+}
+
+func normalizeTicket(t Ticket) Ticket {
+	if t.Weight <= 0 || math.IsNaN(t.Weight) || math.IsInf(t.Weight, 0) {
 		t.Weight = 1
 	}
+	if t.Priority < 0 || t.Priority >= numPriorities {
+		t.Priority = PriorityNormal
+	}
+	if t.Cost < 0 || math.IsNaN(t.Cost) || math.IsInf(t.Cost, 0) {
+		t.Cost = 0
+	}
+	return t
+}
+
+func newWaiter(t Ticket) *waiter {
+	t = normalizeTicket(t)
 	w := &waiter{
 		tenant: t.Tenant, weight: t.Weight, prio: t.Priority, cost: t.Cost,
 		enqueued: time.Now(),
@@ -174,17 +224,77 @@ func (q *Queue) Wait(ctx context.Context, t Ticket, try func() bool) error {
 		result:   make(chan bool, 1),
 		shed:     make(chan struct{}),
 	}
-	if t.Priority < 0 || t.Priority >= numPriorities {
-		w.prio = PriorityNormal
-	}
-	if err := q.enqueue(w); err != nil {
-		q.outcome(w, "full")
-		return err
-	}
-	q.Notify()
+	return w
+}
 
-	timer := time.NewTimer(q.cfg.MaxWait)
-	defer timer.Stop()
+// Admit atomically gates the empty-queue fast path and enqueues on failure.
+// Holding the memory queue lock across the first attempt prevents newcomers
+// from slipping into the gap between a failed attempt and enqueueing.
+func (q *Queue) Admit(parent context.Context, t Ticket, try TryAdmit) (bool, error) {
+	ctx, cancel := context.WithTimeout(parent, q.cfg.MaxWait)
+	defer cancel()
+	contextError := func() error {
+		if parent.Err() != nil {
+			return parent.Err()
+		}
+		return ErrTimeout
+	}
+	w := newWaiter(t)
+	if ctx.Err() != nil {
+		return false, contextError()
+	}
+	q.mu.Lock()
+	if q.closed {
+		q.mu.Unlock()
+		return false, ErrClosed
+	}
+	if ctx.Err() != nil {
+		q.mu.Unlock()
+		return false, contextError()
+	}
+	if q.size == 0 && q.current == nil {
+		at, err := try(ctx)
+		if ctx.Err() != nil {
+			q.mu.Unlock()
+			if at.Ready && at.Release != nil {
+				at.Release()
+			}
+			return false, contextError()
+		}
+		if at.Ready || err != nil {
+			if at.Ready && err == nil {
+				q.vtc[w.tenant] += w.cost / w.weight
+			}
+			q.mu.Unlock()
+			if at.Ready && err != nil && at.Release != nil {
+				at.Release()
+			}
+			return false, err
+		}
+	}
+	err := q.enqueueLocked(w)
+	q.mu.Unlock()
+	if err != nil {
+		q.outcome(w, "full")
+		return true, err
+	}
+	return true, q.waitContext(parent, ctx, w, try)
+}
+
+func (q *Queue) wait(parent context.Context, w *waiter, try TryAdmit) error {
+	ctx, cancel := context.WithTimeout(parent, q.cfg.MaxWait)
+	defer cancel()
+	return q.waitContext(parent, ctx, w, try)
+}
+
+func (q *Queue) waitContext(parent, ctx context.Context, w *waiter, try TryAdmit) error {
+	q.Notify()
+	contextError := func() error {
+		if parent.Err() != nil {
+			return parent.Err()
+		}
+		return ErrTimeout
+	}
 	for {
 		select {
 		case <-w.turn:
@@ -197,24 +307,51 @@ func (q *Queue) Wait(ctx context.Context, t Ticket, try func() bool) error {
 				q.current = nil
 				q.mu.Unlock()
 				w.result <- false
-				q.outcome(w, "canceled")
-				return ctx.Err()
+				if parent.Err() != nil {
+					q.outcome(w, "canceled")
+				} else {
+					q.outcome(w, "timeout")
+				}
+				return contextError()
 			}
-			ok := try()
+			at, err := try(ctx)
+			if at.Ready && at.Release != nil && ctx.Err() != nil {
+				err = contextError()
+			}
+			ok := at.Ready && err == nil
 			q.mu.Lock()
+			if q.closed && at.Release != nil {
+				err = ErrClosed
+				ok = false
+			}
 			q.current = nil
 			shed := false
 			switch {
 			case ok:
 				w.state = stateDone
 				q.vtc[w.tenant] += w.cost / w.weight
+			case err != nil:
+				w.state = stateDone
 			case w.shedPending:
 				w.state, shed = stateDone, true
 			default:
 				q.pushLocked(w, true)
 			}
 			q.mu.Unlock()
-			w.result <- ok
+			w.result <- ok || err != nil
+			if err != nil {
+				if at.Ready && at.Release != nil {
+					at.Release()
+				}
+				outcome := "error"
+				if errors.Is(err, ErrTimeout) {
+					outcome = "timeout"
+				} else if parent.Err() != nil {
+					outcome = "canceled"
+				}
+				q.outcome(w, outcome)
+				return err
+			}
 			if ok {
 				q.outcome(w, "granted")
 				return nil
@@ -226,14 +363,14 @@ func (q *Queue) Wait(ctx context.Context, t Ticket, try func() bool) error {
 		case <-w.shed:
 			q.outcome(w, "shed")
 			return ErrShed
-		case <-timer.C:
-			q.leave(w)
-			q.outcome(w, "timeout")
-			return ErrTimeout
 		case <-ctx.Done():
 			q.leave(w)
-			q.outcome(w, "canceled")
-			return ctx.Err()
+			if parent.Err() != nil {
+				q.outcome(w, "canceled")
+			} else {
+				q.outcome(w, "timeout")
+			}
+			return contextError()
 		case <-q.stop:
 			q.leave(w)
 			q.outcome(w, "canceled")
@@ -259,6 +396,10 @@ func (q *Queue) setDepthLocked(p Priority, delta int) {
 func (q *Queue) enqueue(w *waiter) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	return q.enqueueLocked(w)
+}
+
+func (q *Queue) enqueueLocked(w *waiter) error {
 	if q.closed {
 		return ErrClosed
 	}
@@ -428,9 +569,14 @@ func (q *Queue) dispatch() {
 		w.turn <- struct{}{}
 		q.mu.Unlock()
 
-		if ok := <-w.result; !ok {
-			skip[w] = true
-			failures++
+		select {
+		case ok := <-w.result:
+			if !ok {
+				skip[w] = true
+				failures++
+			}
+		case <-q.stop:
+			return
 		}
 	}
 }

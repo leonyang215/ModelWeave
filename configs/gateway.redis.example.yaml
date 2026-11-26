@@ -1,0 +1,45 @@
+# Two gateway replicas can use this same file. Set MW_API_LISTEN and
+# MW_REGISTRY_LISTEN differently for each; keep MW_REDIS_URL/namespace equal.
+# See docs/state-and-scheduling.md for a complete example.
+server:
+  listen: "${MW_API_LISTEN}"
+  grpc_listen: "${MW_REGISTRY_LISTEN}"
+  expose_routing_headers: true
+  control_token: "${MW_CONTROL_TOKEN}"
+tokenizer:
+  endpoints: ["http://127.0.0.1:8090"]
+auth: {enabled: true}
+tenants:
+  - name: team-a
+    api_keys: ["sk-team-a"]
+    priority: normal
+    weight: 1
+    rpm: 600                         # shared across ALL gateways in this namespace
+    tpm: 2000000
+    max_concurrency: 128
+state:
+  backend: redis
+  sync_interval: 250ms
+  redis:
+    url: "${MW_REDIS_URL}"
+    namespace: modelweave-demo-v2
+    timeout: 1s
+    lease_ttl: 15s
+discovery: {heartbeat_ttl: 15s}
+kv_index: {type: events, block_size: 64, optimistic_ttl: 1s}
+models:
+  - name: deepseek-v4.1
+    tokenizer_model: DeepSeek-V4.1-Flash
+    normal: {enabled: true, session_affinity: true, fallback_to_pd: true}
+    admission: {queue_size: 512, max_wait: 30s, backfill_depth: 4} # global per model
+    routing:
+      prefill:
+        policy: weighted
+        scorers:
+          - {name: prefix-cache, weight: 2}
+          - {name: load, weight: 1}
+      decode:
+        policy: weighted
+        scorers:
+          - {name: prefix-cache, weight: 1}
+          - {name: load, weight: 1}

@@ -79,7 +79,7 @@ models: [{name: m, aliases: [m-alias]}, {name: n}]
 		t.Fatalf("d0: %v %v", resp, err)
 	}
 	w := s.reg.Get("d0")
-	if w == nil || w.Spec().Model != "m" || w.Spec().Target != "host-a:9001" || !w.Spec().ServesNormal() || w.Source != "heartbeat" {
+	if w == nil || w.Spec().Model != "m" || w.Spec().Target != "host-a:9001" || !w.Spec().ServesNormal() || w.Source() != "heartbeat" {
 		t.Fatalf("d0 not registered under the canonical model with its target: %+v", w)
 	}
 	if snap := w.Snapshot(time.Now(), 0); !snap.HasState || snap.State.RunningRequests != 2 || snap.Draining {
@@ -148,7 +148,7 @@ models: [{name: m, aliases: [m-alias]}, {name: n}]
 	if _, err := rc.PublishKVEvents(auth, &mwipv1.PublishKVEventsRequest{InstanceId: "unknown", Events: &mwipv1.KVEvents{Stored: []uint64{4}}}); status.Code(err) != codes.NotFound {
 		t.Fatalf("kv events of an unknown instance: %v", err)
 	}
-	if blocks, per := s.index.(*kvindex.Events).Exact().Stats(); blocks != 3 || per["d0"] != 3 {
+	if blocks, per := s.index.(*kvindex.Events).Exact().Stats(); blocks != 3 || per[w.CacheKey()] != 3 {
 		t.Fatalf("event index %d %v", blocks, per)
 	}
 

@@ -45,8 +45,8 @@ type Model struct {
 	Decode    *scheduler.Scheduler
 	Encode    *scheduler.Scheduler
 	Unified   *scheduler.Scheduler
-	Artifacts *ArtifactCache
-	Sessions  *SessionMap
+	Artifacts ArtifactStore
+	Sessions  SessionStore
 }
 
 // Job is one rendered client request.
@@ -179,6 +179,9 @@ func (o *Orchestrator) has(model string, role registry.Role, normal bool) bool {
 // Plan schedules a job and reserves its workers. It returns
 // scheduler.ErrNoCapacity when the job should wait in the admission queue.
 func (o *Orchestrator) Plan(ctx context.Context, job *Job, opts PlanOpts) (*Plan, error) {
+	if err := o.reg.Sync(ctx); err != nil {
+		return nil, err
+	}
 	m := job.Model
 	mode := m.Cfg.Mode
 	if opts.ForceMode != "" {
@@ -248,9 +251,14 @@ func (o *Orchestrator) planAuto(ctx context.Context, job *Job, opts PlanOpts, ha
 		return nil, ErrNoRoute
 	}
 	if normalOK && nc.SessionAffinity {
-		if wid, ok := m.Sessions.Get(job.SessionKey); ok && !opts.ExcludeD[wid] {
-			if d, err := o.scheduleNormalD(ctx, job, opts, wid); err == nil {
-				return &Plan{Mode: ModeNormal, Reason: "session", D: d}, nil
+		if cached, ok := m.Sessions.Get(job.SessionKey); ok {
+			for _, w := range o.reg.Candidates(m.Name, registry.RoleDecode) {
+				if w.CacheKey() != cached || opts.ExcludeD[w.ID()] {
+					continue
+				}
+				if d, err := o.scheduleNormalD(ctx, job, opts, w.ID()); err == nil {
+					return &Plan{Mode: ModeNormal, Reason: "session", D: d}, nil
+				}
 			}
 		}
 	}

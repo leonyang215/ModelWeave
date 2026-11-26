@@ -151,6 +151,10 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request, protocol strin
 
 	ctx, cancel := context.WithTimeout(r.Context(), s.cfg.Server.RequestTimeout.D())
 	defer cancel()
+	if err := s.reg.Sync(ctx); err != nil {
+		fail(classify(err))
+		return
+	}
 
 	// 1. Render: the tokenizer converts the protocol request into the
 	// intermediate state (token list, media placements, options).
@@ -199,7 +203,7 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request, protocol strin
 
 	// 3. Tenant rate limits (TPM charged up front, reconciled at the end).
 	estimate := int64(rr.PromptTokens + min(job.MaxTokens(), m.cfg.Reserve.OutputTokens))
-	lease, err := s.limiter.Admit(tenant, estimate)
+	lease, err := s.limiter.AdmitContext(ctx, tenant, estimate)
 	if err != nil {
 		var rj *qos.Rejection
 		if errors.As(err, &rj) {
@@ -209,7 +213,11 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request, protocol strin
 		fail(classify(err))
 		return
 	}
-	defer func() { lease.Finish(int64(rec.PromptTokens + rec.CompletionTokens)) }()
+	defer func() {
+		if err := lease.Finish(int64(rec.PromptTokens + rec.CompletionTokens)); err != nil {
+			s.log.Warn("tenant lease reconciliation deferred", "request_id", rec.ID, "error", err)
+		}
+	}()
 
 	// 4. Overload protection by load level and priority.
 	if level, _ := m.overload.Level(); level > 0 && m.cfg.Admission.Overload.Enabled {
@@ -274,14 +282,16 @@ func (s *Server) predictCacheRatio(ctx context.Context, job *orchestrator.Job) f
 		return 0
 	}
 	var ids []string
+	keys := make(map[string]string)
 	for _, role := range []registry.Role{registry.RoleDecode, registry.RoleUnified, registry.RolePrefill} {
 		for _, w := range s.reg.Candidates(job.Model.Name, role) {
 			ids = append(ids, w.ID())
+			keys[w.ID()] = w.CacheKey()
 		}
 	}
 	matches, err := s.index.Match(ctx, kvindex.Query{
 		Model: job.Model.Name, Role: string(registry.RoleDecode), BlockSize: job.Model.BlockSize, Blocks: job.Blocks,
-		Candidates: ids,
+		Candidates: ids, WorkerKeys: keys,
 	})
 	if err != nil {
 		return 0
@@ -297,33 +307,35 @@ func (s *Server) predictCacheRatio(ctx context.Context, job *orchestrator.Job) f
 // no worker has capacity.
 func (s *Server) planWithQueue(ctx context.Context, job *orchestrator.Job, m *modelRT, rec *record) (*orchestrator.Plan, error) {
 	t0 := time.Now()
-	plan, err := s.orch.Plan(ctx, job, orchestrator.PlanOpts{})
-	if err == nil || !errors.Is(err, scheduler.ErrNoCapacity) {
-		return plan, err
-	}
-	rec.Queued = true
-	var planErr error
+	var plan *orchestrator.Plan
 	weight := 1.0
 	if t, ok := s.tenants[job.Tenant]; ok {
 		weight = t.Weight
 	}
-	werr := m.queue.Wait(ctx, qos.Ticket{
+	queued, werr := m.queue.Admit(ctx, qos.Ticket{
 		Tenant: job.Tenant, Weight: weight, Priority: job.Priority,
 		Cost: float64(job.Render.PromptTokens + min(job.MaxTokens(), m.cfg.Reserve.OutputTokens)),
-	}, func() bool {
-		p, e := s.orch.Plan(ctx, job, orchestrator.PlanOpts{})
+	}, func(turnCtx context.Context) (qos.Attempt, error) {
+		p, e := s.orch.Plan(turnCtx, job, orchestrator.PlanOpts{})
 		if e == nil {
 			plan = p
-			return true
+			return qos.Attempt{Ready: true, Release: func() {
+				p.Release(false)
+				if plan == p {
+					plan = nil
+				}
+			}}, nil
 		}
 		if errors.Is(e, scheduler.ErrNoCapacity) {
-			return false
+			return qos.Attempt{}, nil
 		}
-		planErr = e
-		return true
+		return qos.Attempt{}, e
 	})
-	rec.QueueDur = time.Since(t0)
-	s.met.StageDuration.WithLabelValues(m.cfg.Name, "admission_queue").Observe(rec.QueueDur.Seconds())
+	rec.Queued = queued
+	if queued {
+		rec.QueueDur = time.Since(t0)
+		s.met.StageDuration.WithLabelValues(m.cfg.Name, "admission_queue").Observe(rec.QueueDur.Seconds())
+	}
 	switch {
 	case errors.Is(werr, qos.ErrQueueFull):
 		rec.Admission = "rejected_queue_full"
@@ -331,13 +343,13 @@ func (s *Server) planWithQueue(ctx context.Context, job *orchestrator.Job, m *mo
 		rec.Admission = "shed"
 	case errors.Is(werr, qos.ErrTimeout):
 		rec.Admission = "rejected_timeout"
-	case werr == nil && planErr == nil:
+	case werr == nil && queued:
 		rec.Admission = "queued"
 	}
 	if werr != nil {
 		return nil, werr
 	}
-	return plan, planErr
+	return plan, nil
 }
 
 type execResult struct {

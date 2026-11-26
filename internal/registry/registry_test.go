@@ -1,6 +1,9 @@
 package registry
 
 import (
+	"context"
+	"errors"
+	"math"
 	"slices"
 	"strings"
 	"testing"
@@ -176,8 +179,8 @@ func TestStaticInstancesStayStatic(t *testing.T) {
 	r, c := newTestRegistry(time.Second)
 	_, _, _ = r.Upsert(spec("s0", "m", RoleUnified), "static")
 	w, created, _ := r.Upsert(spec("s0", "m", RoleUnified), "heartbeat")
-	if created || w.Source != "static" {
-		t.Fatalf("source %s created %v", w.Source, created)
+	if created || w.Source() != "static" {
+		t.Fatalf("source %s created %v", w.Source(), created)
 	}
 	c.t = c.t.Add(time.Minute)
 	if got := r.Sweep(); len(got) != 0 {
@@ -234,5 +237,25 @@ func TestFailuresEjectForCooldown(t *testing.T) {
 	}
 	if !w.Snapshot(c.t.Add(10*time.Second), 0).Healthy {
 		t.Fatal("still ejected after the cooldown")
+	}
+}
+
+func TestStateValidationAndRevisionFencing(t *testing.T) {
+	r, c := newTestRegistry(time.Minute)
+	w, _, _ := r.Upsert(spec("d0", "m", RoleDecode), SourceHeartbeat)
+	old := w.Snapshot(c.t, 0)
+	if err := w.UpdateState(EngineState{KVUsage: math.MaxFloat64, KVCapacityTokens: 1000}, c.t); err != nil {
+		t.Fatal(err)
+	}
+	if s := w.Snapshot(c.t, 0); s.EffectiveKVUsed != 1000 {
+		t.Fatalf("overflow made full KV appear empty: %+v", s)
+	}
+	if err := w.UpdateStateIfRevision(context.Background(), EngineState{}, c.t, old.Revision); !errors.Is(err, ErrConflict) {
+		t.Fatalf("old poll accepted: %v", err)
+	}
+	for _, st := range []EngineState{{RunningRequests: -1}, {KVUsedTokens: -1}, {KVUsage: math.NaN()}, {DecodeTokensPerSec: math.Inf(1)}} {
+		if err := w.UpdateState(st, c.t); err == nil {
+			t.Errorf("invalid state accepted: %+v", st)
+		}
 	}
 }

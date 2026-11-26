@@ -3,6 +3,8 @@ package config
 
 import (
 	"fmt"
+	"math"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -42,6 +44,7 @@ type Config struct {
 	Auth        Auth        `yaml:"auth"`
 	Tenants     []Tenant    `yaml:"tenants"`
 	Discovery   Discovery   `yaml:"discovery"`
+	State       State       `yaml:"state"`
 	EngineState EngineState `yaml:"engine_state"`
 	Health      Health      `yaml:"health"`
 	KVIndex     KVIndex     `yaml:"kv_index"`
@@ -98,6 +101,21 @@ type Tenant struct {
 type Discovery struct {
 	HeartbeatTTL Duration        `yaml:"heartbeat_ttl"`
 	Workers      []registry.Spec `yaml:"workers"`
+}
+
+// State selects single-process memory or a Redis namespace shared by gateway
+// replicas. Static model/tenant configuration remains local to each replica.
+type State struct {
+	Backend      string   `yaml:"backend"` // memory | redis
+	SyncInterval Duration `yaml:"sync_interval"`
+	Redis        Redis    `yaml:"redis"`
+}
+
+type Redis struct {
+	URL       string   `yaml:"url"`
+	Namespace string   `yaml:"namespace"`
+	Timeout   Duration `yaml:"timeout"`
+	LeaseTTL  Duration `yaml:"lease_ttl"`
 }
 
 // EngineState configures how the gateway learns the load of instances:
@@ -297,6 +315,21 @@ func (c *Config) applyDefaults() {
 		c.Auth.AnonymousTenant = "anonymous"
 	}
 	defDur(&c.Discovery.HeartbeatTTL, 15*time.Second)
+	if c.State.Backend == "" {
+		c.State.Backend = "memory"
+	}
+	if c.State.SyncInterval == 0 {
+		c.State.SyncInterval = Duration(250 * time.Millisecond)
+	}
+	if c.State.Redis.Namespace == "" {
+		c.State.Redis.Namespace = "modelweave"
+	}
+	if c.State.Redis.Timeout == 0 {
+		c.State.Redis.Timeout = Duration(time.Second)
+	}
+	if c.State.Redis.LeaseTTL == 0 {
+		c.State.Redis.LeaseTTL = Duration(15 * time.Second)
+	}
 	defDur(&c.EngineState.StaleAfter, 10*time.Second)
 	p := &c.EngineState.Poll
 	defDur(&p.Interval, 2*time.Second)
@@ -378,6 +411,21 @@ func (c *Config) applyDefaults() {
 }
 
 func (c *Config) validate() error {
+	if c.State.Backend != "memory" && c.State.Backend != "redis" {
+		return fmt.Errorf("state.backend: want memory or redis")
+	}
+	if c.State.SyncInterval <= 0 {
+		return fmt.Errorf("state.sync_interval must be positive")
+	}
+	if c.State.Backend == "redis" {
+		u, err := url.Parse(c.State.Redis.URL)
+		if err != nil || u == nil || (u.Scheme != "redis" && u.Scheme != "rediss") || u.Hostname() == "" {
+			return fmt.Errorf("state.redis.url must be a redis:// or rediss:// URL")
+		}
+		if c.State.Redis.Timeout <= 0 || c.State.Redis.LeaseTTL.D() < 3*c.State.Redis.Timeout.D() || c.State.SyncInterval.D() > c.State.Redis.LeaseTTL.D()/3 {
+			return fmt.Errorf("state.redis requires timeout > 0, lease_ttl >= 3*timeout and sync_interval <= lease_ttl/3")
+		}
+	}
 	if len(c.Tokenizer.Endpoints) == 0 {
 		return fmt.Errorf("tokenizer.endpoints must list at least one tokenizer URL")
 	}
@@ -391,9 +439,22 @@ func (c *Config) validate() error {
 		return fmt.Errorf("kv_index.type %q: want approx, events, remote or none", c.KVIndex.Type)
 	}
 	keys := map[string]string{}
+	tenantNames := map[string]bool{}
 	for _, t := range c.Tenants {
 		if t.Name == "" {
 			return fmt.Errorf("tenant without name")
+		}
+		if tenantNames[t.Name] {
+			return fmt.Errorf("tenant name %q is used twice", t.Name)
+		}
+		tenantNames[t.Name] = true
+		if t.RPM < 0 || t.TPM < 0 || t.MaxConcurrency < 0 {
+			return fmt.Errorf("tenant %s: limits must be non-negative", t.Name)
+		}
+		for _, v := range []float64{t.RPM, t.TPM, t.Weight} {
+			if math.IsNaN(v) || math.IsInf(v, 0) {
+				return fmt.Errorf("tenant %s: limits/weight must be finite", t.Name)
+			}
 		}
 		if _, err := qos.ParsePriority(t.Priority); err != nil {
 			return fmt.Errorf("tenant %s: %w", t.Name, err)

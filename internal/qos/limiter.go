@@ -1,6 +1,7 @@
 package qos
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync"
@@ -64,6 +65,7 @@ func (r *Rejection) Error() string {
 type Limiter struct {
 	mu      sync.Mutex
 	tenants map[string]*tenantState
+	closed  bool
 }
 
 type tenantState struct {
@@ -118,71 +120,76 @@ type Lease struct {
 	estimated float64
 	done      bool
 	mu        sync.Mutex
+	finish    func(int64) error // shared backend; it queues failed reconciliation
 }
 
 // Admit charges one request and estimatedTokens against the tenant's limits.
 func (l *Limiter) Admit(tenant string, estimatedTokens int64) (*Lease, error) {
+	return l.AdmitContext(context.Background(), tenant, estimatedTokens)
+}
+
+func (l *Limiter) AdmitContext(ctx context.Context, tenant string, estimatedTokens int64) (*Lease, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closed {
+		return nil, ErrClosed
+	}
 	st, ok := l.tenants[tenant]
 	if !ok {
-		l.mu.Unlock()
 		return &Lease{l: l, tenant: tenant}, nil
 	}
 	if st.policy.MaxConcurrency > 0 && st.inflight >= st.policy.MaxConcurrency {
-		l.mu.Unlock()
 		return nil, &Rejection{Reason: "concurrency", RetryAfter: time.Second}
 	}
-	st.inflight++
 	rpm, tpm := st.rpm, st.tpm
-	l.mu.Unlock()
-
-	release := func() {
-		l.mu.Lock()
-		st.inflight--
-		l.mu.Unlock()
-	}
 	if rpm != nil {
 		if ok, wait := rpm.Take(1); !ok {
-			release()
 			return nil, &Rejection{Reason: "rpm", RetryAfter: wait}
 		}
 	}
-	est := float64(estimatedTokens)
+	est := float64(max(estimatedTokens, 0))
 	if tpm != nil && est > 0 {
 		if ok, wait := tpm.Take(est); !ok {
 			if rpm != nil {
 				rpm.Adjust(1)
 			}
-			release()
 			return nil, &Rejection{Reason: "tpm", RetryAfter: wait}
 		}
 	}
+	st.inflight++
 	return &Lease{l: l, tenant: tenant, estimated: est}, nil
 }
 
 // Finish releases the concurrency slot and reconciles the token estimate with
 // the tokens actually used (prompt + completion). It is idempotent.
-func (ls *Lease) Finish(actualTokens int64) {
+func (ls *Lease) Finish(actualTokens int64) error {
 	if ls == nil {
-		return
+		return nil
 	}
 	ls.mu.Lock()
 	if ls.done {
 		ls.mu.Unlock()
-		return
+		return nil
 	}
 	ls.done = true
 	ls.mu.Unlock()
+	if ls.finish != nil {
+		return ls.finish(actualTokens)
+	}
 
 	ls.l.mu.Lock()
 	st, ok := ls.l.tenants[ls.tenant]
 	if ok && st.inflight > 0 {
 		st.inflight--
 	}
-	ls.l.mu.Unlock()
 	if ok && st.tpm != nil && actualTokens >= 0 {
 		st.tpm.Adjust(ls.estimated - float64(actualTokens))
 	}
+	ls.l.mu.Unlock()
+	return nil
 }
 
 // TenantStats is a snapshot used for metrics and the admin API.
@@ -217,3 +224,12 @@ func (l *Limiter) Stats() []TenantStats {
 	}
 	return out
 }
+
+func (l *Limiter) StatsContext(ctx context.Context) ([]TenantStats, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return l.Stats(), nil
+}
+
+func (l *Limiter) Close() { l.mu.Lock(); l.closed = true; l.mu.Unlock() }

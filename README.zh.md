@@ -13,7 +13,10 @@ ModelWeave 位于应用和一组推理引擎之间。应用使用 OpenAI 或 Ant
 - **多模型，实例按角色划分。** 每个模型有自己的一组引擎实例，每个实例承担一个角色：encode、prefill、decode 或 unified。实例通过心跳注册到网关的 mwip Registry；网关按"模型 + 角色"维护它们，心跳中断的实例会过期移除，单个实例可以 drain 或下线，其余实例照常服务。
 - **分离式执行。** 每个请求以 *normal*（单个实例）、*PD*（prefill 与 decode 在不同实例上，支持 push、bootstrap、pull 三种 KV 握手）或 *EPD*（媒体先在 encode 实例上编码）方式执行。执行方式按请求根据缓存命中和 prompt 长度决定，带重试和回退。
 - **前缀缓存感知调度。** 图片和视频帧占用的位置填的是由内容推导出的 pad value，所以 block hash 也能覆盖多模态 prompt。缓存信息来自路由记录、引擎上报的 KV 事件或外部索引；负载来自心跳或 `GetState` 轮询。
+- **单点或分布式状态。** 默认使用进程内存；选择 Redis 后，多个网关共享注册表、实例负载/健康/drain、原子容量预留、前缀索引、会话和 embedding artifact 元数据。引擎向任意一个副本发心跳即可。
+- **插件式调度。** 策略和评分插件通过工厂注册；默认按权重组合 `prefix-cache` 与 `load` 两种评分，每个模型的各角色可以单独配置权重。
 - **流量控制。** 按 API key 区分租户，支持优先级、请求数和 token 数限流、并发上限、公平的准入队列以及过载保护。
+- **QoS 双后端。** `state.backend` 同时切换租户限流和准入队列：内存模式为单机额度/队列；Redis 模式为跨网关全局 RPM、TPM、并发上限及按模型共享的优先级/加权公平队列，支持取消、超时和故障回收。
 - **可观测、可测试。** 每个阶段都有 Prometheus 指标，每个请求输出一行 JSON 访问日志；mock 引擎让整个系统不需要 GPU 就能运行。
 
 ## 架构
@@ -146,6 +149,7 @@ bin/modelweave-gateway -config configs/gateway.example.yaml
 
 - [docs/mwip.md](docs/mwip.md)：引擎协议 mwip，包括模型、角色与实例，Engine 和 Registry 服务，Generate 流，错误处理，实例的生命周期，如何实现一个引擎
 - [docs/architecture.md](docs/architecture.md)：组件、请求生命周期、模型注册表、执行方式、调度、QoS、代码目录
+- [docs/state-and-scheduling.md](docs/state-and-scheduling.md)：内存/Redis 状态、跨副本一致性与故障语义、双网关示例、调度插件与评分权重
 - [docs/protocol.md](docs/protocol.md)：中间态、各模型家族的媒体规划、引擎协议、PD 与 EPD、控制面
 - [docs/observability.md](docs/observability.md)：指标、日志、查询示例
 - [deploy/compose/README.md](deploy/compose/README.md)：本地栈

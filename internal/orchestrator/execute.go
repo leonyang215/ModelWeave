@@ -99,7 +99,7 @@ func (o *Orchestrator) Execute(ctx context.Context, job *Job, plan *Plan, emit E
 		if res.err == nil {
 			cur.Release(true)
 			cur.D.Worker.ReportSuccess()
-			m.Sessions.Set(job.SessionKey, cur.D.Spec.ID)
+			m.Sessions.Set(job.SessionKey, cur.D.Worker.CacheKey())
 			return out
 		}
 		cur.Release(false)

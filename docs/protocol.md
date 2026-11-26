@@ -452,7 +452,7 @@ reports its state; a heartbeat describes one instance.
 
 | RPC | |
 |---|---|
-| `Heartbeat(HeartbeatRequest)` | register or refresh an instance, with its `EngineState`, KV events and draining flag; answers `registered` (new to the gateway) and the `ttl_ms` |
+| `Heartbeat(HeartbeatRequest)` | register or refresh an instance, with its `EngineState`, KV events and draining flag; answers `registered` (new to the registry/backend namespace) and the `ttl_ms` |
 | `PublishKVEvents(PublishKVEventsRequest)` | KV events of an instance between heartbeats |
 | `Deregister(DeregisterRequest)` | remove an instance at once (graceful shutdown) |
 
@@ -475,6 +475,11 @@ at once; its next heartbeat registers it again.
 Instances can also be listed statically in `discovery.workers` with the same
 fields (`id`, `model`, `role`, `target`, ...). They send no heartbeats and
 never expire.
+
+`state.backend: redis` shares these registrations and instance state across
+gateways. Engines may send every Registry call to any replica; no mwip
+message change is needed. Storage failures return `UNAVAILABLE`, not a
+successful local-only mutation. See [state-and-scheduling.md](state-and-scheduling.md).
 
 ### 4.2 EngineState
 
@@ -515,6 +520,7 @@ evicted, `cleared` drops everything known about the instance.
 `POST {remote_url}/v1/prefix/match`
 `{"model": "...", "block_size": 64, "block_hashes": [u64...], "candidates": ["decode-0", ...]}`
 → `{"matched_blocks": {"decode-0": 12, "decode-1": 0}}`.
-On error or timeout the gateway falls back to its local approximate index.
+On error or timeout the gateway falls back to its approximate index (local
+in memory mode, shared in Redis mode).
 The block hashes are those of §4.3 (media positions already hold their pad
 values), so the service needs no knowledge of media or prompt formats.

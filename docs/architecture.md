@@ -60,6 +60,9 @@ Who does what:
    (`internal/qos/limiter.go`). TPM is charged up front with prompt + reserved
    output and reconciled with the real usage at the end. Violations return
    **429 + Retry-After**.
+
+   The backend is selected with the same `state.backend` as the registry:
+   process-local memory, or global Redis quotas across gateway replicas.
 5. **Overload shedding.** An overload controller per model maps pool
    utilization (KV usage, prefill queue, admission-queue fill) to levels
    L0–L4 with hysteresis; a priority matrix admits, drops probabilistically or
@@ -73,7 +76,12 @@ Who does what:
    picks the execution mode and reserves workers. When no worker has capacity
    the request waits in the model's admission queue (strict priority classes,
    VTC fair sharing between tenants, backfill, shedding of lower priorities,
-   deadline → 503).
+    deadline → 503).
+
+   In Redis mode this is a single per-model priority/VTC queue, not a queue
+   per replica. Even the initial fast path goes through its fenced turn;
+   canceled/stale turns cannot reserve worker capacity. Request bodies stay
+   on their ingress gateway, which executes its callback when selected.
 8. **Execute** (`internal/orchestrator/execute.go`). Run the plan. The engine
    client (`internal/engine`) turns each stage into an mwip `Generate` call
    and reads its stream as events (accepted, prefill done, delta, finish,
@@ -118,6 +126,14 @@ gateway serves on `server.grpc_listen` (protocol §4.1):
 
 Static instances (`discovery.workers`) are configured with the same fields;
 they never expire, and `engine_state.poll` gets their load with `GetState`.
+
+State lives in the configured backend: single-process `state.backend: memory`
+(default), or a shared Redis namespace. In Redis mode engines can heartbeat
+to any replica: every gateway sees the same registrations, engine reports,
+drain flags, health and reservations. Prefix indexes, sessions and embedding
+artifact metadata, tenant quotas and admission queues are shared too.
+See [state-and-scheduling.md](state-and-scheduling.md) for configuration,
+atomicity, leases, expiry, failure behaviour and a two-replica example.
 
 ## Execution modes
 
@@ -179,8 +195,9 @@ pair (`retry.whole_retries`).
 
 ### Reservations
 
-The gateway keeps an optimistic ledger per worker
-(`internal/registry/worker.go`):
+The gateway keeps an optimistic ledger per worker in its state backend
+(`internal/registry/worker.go`): local in memory mode, shared across all live
+gateway replicas in Redis mode:
 
 * decode / unified / normal: KV tokens = prompt + reserved output
   (`min(max_tokens, reservation.output_tokens)`: engines grow longer outputs
@@ -190,9 +207,10 @@ The gateway keeps an optimistic ledger per worker
   completes.
 
 Engine-reported usage is the truth: the effective usage of a worker is
-`max(own reservations, reported usage + reservations made since the report)`,
-so stale reports never over-commit a worker and several gateway replicas can
-share workers. Workers still do the hard check and answer
+`max(live reservations, reported usage + reservations made since the report)`.
+The final capacity check and reservation are atomic in the backend, including
+across gateway replicas in Redis mode. Reservations are optimistic: workers
+still do the hard check and answer
 `capacity_exhausted`, which the gateway treats as "retry elsewhere".
 
 ## Scheduling
@@ -206,16 +224,24 @@ share workers. Workers still do the hard check and answer
 3. prefix-cache lookup through the `kvindex.Index` adapter;
 4. load per candidate (queued prefill tokens for P, running requests and KV
    utilization for D);
-5. the policy picks; the reservation is taken under the same lock.
+5. the registered policy picks; the backend atomically checks the snapshot's
+   admission revision/capacity bounds and reserves, retrying on contention.
 
 Policies (per role, `routing.<role>.policy`):
 
 | Policy | Behaviour |
 |---|---|
-| `cache_aware` (default) | SGLang-router style: when load is balanced, the longest cached prefix wins if it covers `cache_threshold` of the prompt; otherwise, and whenever load is imbalanced (`balance_abs_threshold` and `balance_rel_threshold`), the least loaded worker wins. A miss seeds the chosen worker's cache, so a shared prefix follows it. |
-| `weighted` | score = `cache_weight·cache_ratio − load_weight·norm_load + affinity_weight·[session match]` (llm-d style scorer composition) |
+| `weighted` (default) | sum of registered scorer outputs times their weights: `prefix-cache` (cached ratio) and `load` (`1 − norm_load`), default weights 1:1; optional `affinity` and custom plugins. Configure `routing.<role>.scorers`. |
+| `prefix-cache`, `load` | a single built-in scorer (encode defaults to `load`) |
+| `cache_aware` | Legacy SGLang-router style: when load is balanced, the longest cached prefix wins if it covers `cache_threshold`; when imbalanced (`balance_abs_threshold`, `balance_rel_threshold`), the least loaded worker wins. |
 | `session_affinity` | rendezvous hashing of the session key with bounded load; falls back to another policy for keyless requests |
 | `least_load`, `power_of_two`, `round_robin`, `random` | classic load balancing |
+
+All policies are registered factories; scoring plugins implement `Scorer`
+and register with `RegisterScorer`, whole algorithms with `RegisterPolicy`.
+Weights and unknown/duplicate plugin names are validated at startup. The
+old weighted fields remain supported as aliases for scorer terms. Details
+and a plugin example: [state-and-scheduling.md](state-and-scheduling.md).
 
 ### Cache-awareness adapters (`kv_index.type`)
 
@@ -237,6 +263,9 @@ covers multimodal prompts without extra steps.
 * **pull:** `engine_state.poll` asks every instance with `Engine.GetState`,
   so static instances, which send no heartbeats, still inform the scheduler.
   Polls update the load only: registration lives on heartbeats.
+
+Redis-mode replicas coordinate poll leases, and a slow poll cannot overwrite
+a newer heartbeat/state mutation.
 
 State older than `engine_state.stale_after` is ignored; the gateway's own
 reservations always apply.
@@ -327,8 +356,9 @@ tokens), and ends broken streams with the protocol's error event.
 | `internal/scheduler` | scheduling passes and policies |
 | `internal/kvindex` | block hashing, approximate / event / remote prefix indexes |
 | `internal/registry` | instances by model and role, heartbeat expiry, draining, engine state, reservations, passive health |
+| `internal/redisstate` | shared Redis instance state, atomic reservations, owner/poll leases, recovery of failed releases |
 | `internal/enginestate` | the `Engine.GetState` poller |
-| `internal/qos` | token buckets, tenant limiter, admission queue, overload controller |
+| `internal/qos` | memory/Redis QoS backends: token buckets, tenant concurrency leases, priority/VTC admission queue, overload controller |
 | `internal/tokenizer` | tokenizer client (unary render, failover between replicas) |
 | `internal/engine` | the mwip client over gRPC (one connection per target): `Generate` (always streaming), `Encode`, `Abort`, `GetState`; error classification |
 | `internal/mwip` | the intermediate state and engine events in memory, and their conversion to and from the mwip proto messages |

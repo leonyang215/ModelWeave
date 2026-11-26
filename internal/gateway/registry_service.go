@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/subtle"
 	"fmt"
-	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -62,7 +61,7 @@ func tokenInterceptor(token string) grpc.UnaryServerInterceptor {
 // Heartbeat registers or refreshes an instance: one model in one role, at
 // its mwip target. It records the instance's load, KV events and whether
 // it drains. Invalid instances are rejected with the reason.
-func (r *registryService) Heartbeat(_ context.Context, req *mwipv1.HeartbeatRequest) (*mwipv1.HeartbeatResponse, error) {
+func (r *registryService) Heartbeat(ctx context.Context, req *mwipv1.HeartbeatRequest) (*mwipv1.HeartbeatResponse, error) {
 	s := r.s
 	inst := req.GetInstance()
 	reject := func(code codes.Code, format string, args ...any) error {
@@ -95,21 +94,27 @@ func (r *registryService) Heartbeat(_ context.Context, req *mwipv1.HeartbeatRequ
 		MaxRunningRequests: int(inst.GetMaxRunningRequests()), MaxPrefillTokens: inst.GetMaxPrefillQueueTokens(),
 		Labels: inst.GetLabels(),
 	}
-	if existing := s.reg.Get(id); existing != nil && existing.Source == "static" {
-		// Static instances keep their configured identity; heartbeats only
-		// contribute load, KV events and draining.
-		spec = existing.Spec()
+	beat := &registry.Beat{Draining: req.GetDraining()}
+	if req.GetState() != nil {
+		st := registry.StateFromProto(req.GetState())
+		beat.State = &st
 	}
-	wk, created, err := s.reg.Upsert(spec, "heartbeat")
-	if err != nil {
+	if err := spec.Validate(); err != nil {
 		return nil, reject(codes.InvalidArgument, "instance %s: %v", id, err)
 	}
-	if req.GetState() != nil {
-		wk.UpdateState(registry.StateFromProto(req.GetState()), time.Now())
+	if beat.State != nil {
+		if err := beat.State.Validate(); err != nil {
+			return nil, reject(codes.InvalidArgument, "instance %s: %v", id, err)
+		}
 	}
-	wk.SetEngineDraining(req.GetDraining())
+	wk, created, err := s.reg.UpsertContext(ctx, spec, registry.SourceHeartbeat, beat)
+	if err != nil {
+		return nil, reject(codes.Unavailable, "instance %s: %v", id, err)
+	}
 	if ev := mwip.KVEventsFromProto(req.GetKvEvents()); ev != nil {
-		s.applyKVEvents(id, ev)
+		if err := s.applyKVEvents(wk, ev); err != nil {
+			return nil, reject(codes.Unavailable, "instance %s: KV events: %v", id, err)
+		}
 	}
 	if created {
 		s.met.Heartbeats.WithLabelValues("registered").Inc()
@@ -121,22 +126,31 @@ func (r *registryService) Heartbeat(_ context.Context, req *mwipv1.HeartbeatRequ
 }
 
 // PublishKVEvents applies KV events of a registered instance.
-func (r *registryService) PublishKVEvents(_ context.Context, req *mwipv1.PublishKVEventsRequest) (*mwipv1.PublishKVEventsResponse, error) {
+func (r *registryService) PublishKVEvents(ctx context.Context, req *mwipv1.PublishKVEventsRequest) (*mwipv1.PublishKVEventsResponse, error) {
 	id := req.GetInstanceId()
-	if r.s.reg.Get(id) == nil {
+	if err := r.s.reg.Sync(ctx); err != nil {
+		return nil, status.Error(codes.Unavailable, err.Error())
+	}
+	w := r.s.reg.Get(id)
+	if w == nil {
 		return nil, status.Errorf(codes.NotFound, "instance %q is not registered", id)
 	}
 	ev := mwip.KVEventsFromProto(req.GetEvents())
 	if ev == nil || r.s.events == nil {
 		return &mwipv1.PublishKVEventsResponse{}, nil
 	}
-	r.s.applyKVEvents(id, ev)
+	if err := r.s.applyKVEvents(w, ev); err != nil {
+		return nil, status.Error(codes.Unavailable, err.Error())
+	}
 	return &mwipv1.PublishKVEventsResponse{Applied: true}, nil
 }
 
 // Deregister removes an instance at once (graceful shutdown).
-func (r *registryService) Deregister(_ context.Context, req *mwipv1.DeregisterRequest) (*mwipv1.DeregisterResponse, error) {
-	spec, ok := r.s.reg.Remove(req.GetInstanceId())
+func (r *registryService) Deregister(ctx context.Context, req *mwipv1.DeregisterRequest) (*mwipv1.DeregisterResponse, error) {
+	spec, ok, err := r.s.reg.RemoveContext(ctx, req.GetInstanceId())
+	if err != nil {
+		return nil, status.Error(codes.Unavailable, err.Error())
+	}
 	if ok {
 		r.s.met.InstanceRemovals.WithLabelValues(spec.Model, string(spec.Role), "deregistered").Inc()
 	}

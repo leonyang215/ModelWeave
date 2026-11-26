@@ -10,7 +10,11 @@
 package registry
 
 import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -79,87 +83,109 @@ type EngineState struct {
 	Draining            bool    `json:"draining,omitempty"`
 }
 
-// Worker is a registered worker with its state and local accounting.
+// Worker is an immutable handle to one registration. Dynamic state and
+// reservations live in its Store, shared by all gateway replicas in Redis
+// mode. An epoch prevents late polls/releases from modifying a re-registration.
 type Worker struct {
-	spec   atomic.Pointer[Spec]
-	Source string // "static" or "heartbeat"
-
-	mu            sync.Mutex
-	state         EngineState
-	stateAt       time.Time
-	hasState      bool
-	lastSeen      time.Time
-	pendingSince  int64 // KV tokens reserved since the last state report
-	failures      int
-	unhealthyTill time.Time
-	draining      bool // drained by an operator (admin API)
-	engineDrain   bool // the engine reports draining (heartbeat)
-
-	inflight        atomic.Int64 // requests currently assigned (any stage)
-	inflightPrefill atomic.Int64 // uncached prompt tokens being prefilled
-	reservedKV      atomic.Int64 // KV tokens reserved by in-flight requests
-	completed       atomic.Int64
-	errors          atomic.Int64
+	entry     Entry
+	store     Store
+	completed atomic.Int64 // per-gateway counters; sum across replicas
+	errors    atomic.Int64
 }
 
 // Spec returns the worker's current spec.
-func (w *Worker) Spec() Spec { return *w.spec.Load() }
+func (w *Worker) Spec() Spec { return w.entry.Spec }
 
 // ID is shorthand for Spec().ID.
-func (w *Worker) ID() string { return w.spec.Load().ID }
+func (w *Worker) ID() string { return w.entry.Spec.ID }
+
+func (w *Worker) Source() string { return w.entry.Source }
+func (w *Worker) Ref() Ref       { return Ref{ID: w.ID(), Epoch: w.entry.Epoch} }
+
+// CacheKey scopes advisory state to this registration, so a new instance
+// reusing an ID cannot inherit its predecessor's prefixes or sessions.
+func (w *Worker) CacheKey() string { return fmt.Sprintf("%s@%d", w.ID(), w.entry.Epoch) }
 
 // UpdateState records an engine state report (a heartbeat's or a poll's).
 // It does not refresh liveness: registration lives on heartbeats alone.
-func (w *Worker) UpdateState(st EngineState, at time.Time) {
-	w.mu.Lock()
-	w.state = st
-	w.stateAt = at
-	w.hasState = true
-	w.pendingSince = 0
-	w.mu.Unlock()
+func (w *Worker) UpdateState(st EngineState, at time.Time) error {
+	return w.UpdateStateContext(context.Background(), st, at)
 }
 
-// LastSeen is when the worker last reported (a heartbeat or a state poll).
+func (w *Worker) UpdateStateContext(ctx context.Context, st EngineState, at time.Time) error {
+	if err := st.Validate(); err != nil {
+		return err
+	}
+	return w.store.SetState(ctx, w.Ref(), st, at)
+}
+
+// UpdateStateIfRevision prevents a slow GetState response from overwriting a
+// heartbeat/state mutation that arrived while the poll was in flight.
+func (w *Worker) UpdateStateIfRevision(ctx context.Context, st EngineState, at time.Time, revision int64) error {
+	if err := st.Validate(); err != nil {
+		return err
+	}
+	return w.store.SetState(ctx, w.Ref(), st, at, revision)
+}
+
+func (st EngineState) Validate() error {
+	if st.RunningRequests < 0 || st.WaitingRequests < 0 || st.KVUsedTokens < 0 || st.KVCapacityTokens < 0 || st.PrefillQueueTokens < 0 || st.MaxRunningRequests < 0 || st.CachedBlocks < 0 {
+		return fmt.Errorf("engine state counters must be non-negative")
+	}
+	for _, v := range []float64{st.KVUsage, st.DecodeTokensPerSec, st.PrefillTokensPerSec} {
+		if v < 0 || math.IsNaN(v) || math.IsInf(v, 0) {
+			return fmt.Errorf("engine state ratios/throughput must be finite and non-negative")
+		}
+	}
+	return nil
+}
+
+func (s Spec) Validate() error {
+	if s.ID == "" || s.Model == "" || s.Target == "" {
+		return fmt.Errorf("worker spec needs id, model and target")
+	}
+	if _, err := ParseRole(string(s.Role)); err != nil {
+		return err
+	}
+	if s.KVCapacityTokens < 0 || s.MaxRunningRequests < 0 || s.MaxPrefillTokens < 0 {
+		return fmt.Errorf("worker capacity hints must be non-negative")
+	}
+	return nil
+}
+
+// LastSeen is the last heartbeat/registration; state polls do not refresh it.
 func (w *Worker) LastSeen() time.Time {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.lastSeen
-}
-
-// Touch records liveness without a state report.
-func (w *Worker) Touch(at time.Time) {
-	w.mu.Lock()
-	w.lastSeen = at
-	w.mu.Unlock()
+	return w.Snapshot(time.Now(), 0).LastSeen
 }
 
 // SetDraining drains the worker for an operator (admin API): it takes no
 // new requests until undrained, whatever the engine reports.
-func (w *Worker) SetDraining(d bool) {
-	w.mu.Lock()
-	w.draining = d
-	w.mu.Unlock()
+func (w *Worker) SetDraining(d bool) error {
+	return w.SetDrainingContext(context.Background(), d)
+}
+
+func (w *Worker) SetDrainingContext(ctx context.Context, d bool) error {
+	return w.store.SetDrain(ctx, w.Ref(), DrainAdmin, d)
 }
 
 // SetEngineDraining records whether the engine reports draining (its
 // heartbeats).
-func (w *Worker) SetEngineDraining(d bool) {
-	w.mu.Lock()
-	w.engineDrain = d
-	w.mu.Unlock()
+func (w *Worker) SetEngineDraining(d bool) error {
+	return w.store.SetDrain(context.Background(), w.Ref(), DrainEngine, d)
 }
 
 // AdminDrained reports whether an operator drained the worker.
 func (w *Worker) AdminDrained() bool {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.draining
+	return w.Snapshot(time.Now(), 0).AdminDrained
 }
 
 // Snapshot is an immutable view of a worker used by one scheduling pass.
 type Snapshot struct {
-	Worker *Worker
-	Spec   Spec
+	Worker       *Worker
+	Spec         Spec
+	Gone         bool
+	Revision     int64
+	AdminDrained bool
 
 	HasState   bool
 	State      EngineState
@@ -172,7 +198,7 @@ type Snapshot struct {
 	PrefillTok int64 // gateway-tracked uncached prefill tokens in flight
 	ReservedKV int64 // gateway-tracked KV reservation
 	// EffectiveKVUsed merges the reported usage with reservations the
-	// report does not reflect yet (and with this gateway's reservations).
+	// report does not reflect yet (and with all live gateways' reservations).
 	EffectiveKVUsed  int64
 	KVCapacity       int64
 	MaxRunning       int
@@ -207,7 +233,7 @@ func (s *Snapshot) QueuedPrefillTokens() int64 {
 	return q
 }
 
-// Running returns the larger of reported running+waiting and local in-flight.
+// Running returns the larger of reported running+waiting and live in-flight.
 func (s *Snapshot) Running() int64 {
 	r := s.Inflight
 	if s.HasState {
@@ -218,35 +244,76 @@ func (s *Snapshot) Running() int64 {
 	return r
 }
 
+// ReportedKVUsed resolves either engine usage representation. Saturating a
+// ratio at capacity also prevents huge but finite ratios from overflowing an
+// int64 and accidentally making an overloaded instance appear idle.
+func (s *Snapshot) ReportedKVUsed() int64 {
+	if !s.HasState {
+		return 0
+	}
+	if s.State.KVUsedTokens > 0 {
+		return s.State.KVUsedTokens
+	}
+	if s.State.KVUsage >= 1 {
+		return s.KVCapacity
+	}
+	if s.State.KVUsage > 0 && s.KVCapacity > 0 {
+		return int64(s.State.KVUsage * float64(s.KVCapacity))
+	}
+	return 0
+}
+
 // Snapshot captures the worker state. staleAfter bounds how long a state
 // report is trusted.
 func (w *Worker) Snapshot(now time.Time, staleAfter time.Duration) Snapshot {
-	spec := w.Spec()
-	w.mu.Lock()
+	s, err := w.SnapshotContext(context.Background(), now, staleAfter)
+	if err != nil {
+		return Snapshot{Worker: w, Spec: w.Spec(), Gone: true}
+	}
+	return s
+}
+
+func (w *Worker) SnapshotContext(ctx context.Context, now time.Time, staleAfter time.Duration) (Snapshot, error) {
+	recs, err := w.store.Load(ctx, []Ref{w.Ref()}, now)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	return w.snapshot(recs[0], now, staleAfter), nil
+}
+
+func (w *Worker) snapshot(rec Record, now time.Time, staleAfter time.Duration) Snapshot {
 	s := Snapshot{
-		Worker:   w,
-		Spec:     spec,
-		LastSeen: w.lastSeen,
-		Failures: w.failures,
-		Draining: w.draining || w.engineDrain,
+		Worker:       w,
+		Spec:         rec.Entry.Spec,
+		Gone:         rec.Gone,
+		Revision:     rec.Revision,
+		LastSeen:     rec.LastSeen,
+		Failures:     rec.Failures,
+		Draining:     rec.AdminDrain || rec.EngineDrain,
+		AdminDrained: rec.AdminDrain,
 	}
-	if w.hasState && (staleAfter <= 0 || now.Sub(w.stateAt) <= staleAfter) {
+	if rec.Gone {
+		s.Spec = w.Spec()
+		return s
+	}
+	clock := now
+	if !rec.Now.IsZero() {
+		clock = rec.Now
+		// Expose liveness in the caller's clock while computing the age
+		// and cooldown using the store's clock.
+		s.LastSeen = now.Add(-clock.Sub(rec.LastSeen))
+	}
+	if rec.HasState && (staleAfter <= 0 || clock.Sub(rec.StateAt) <= staleAfter) {
 		s.HasState = true
-		s.State = w.state
-		s.StateAge = now.Sub(w.stateAt)
-		s.Draining = s.Draining || w.state.Draining
+		s.State = rec.State
+		s.StateAge = max(clock.Sub(rec.StateAt), 0)
+		s.Draining = s.Draining || rec.State.Draining
 	}
-	pending := w.pendingSince
-	s.Healthy = !now.Before(w.unhealthyTill)
-	w.mu.Unlock()
-
-	s.Inflight = w.inflight.Load()
-	s.PrefillTok = w.inflightPrefill.Load()
-	s.ReservedKV = w.reservedKV.Load()
-
-	s.KVCapacity = spec.KVCapacityTokens
-	s.MaxRunning = spec.MaxRunningRequests
-	s.MaxPrefillTokens = spec.MaxPrefillTokens
+	s.Healthy = !clock.Before(rec.UnhealthyTill)
+	s.Inflight, s.PrefillTok, s.ReservedKV = rec.Inflight, rec.Prefill, rec.ReservedKV
+	s.KVCapacity = s.Spec.KVCapacityTokens
+	s.MaxRunning = s.Spec.MaxRunningRequests
+	s.MaxPrefillTokens = s.Spec.MaxPrefillTokens
 	used := s.ReservedKV
 	if s.HasState {
 		if s.State.KVCapacityTokens > 0 {
@@ -255,10 +322,8 @@ func (w *Worker) Snapshot(now time.Time, staleAfter time.Duration) Snapshot {
 		if s.State.MaxRunningRequests > 0 {
 			s.MaxRunning = s.State.MaxRunningRequests
 		}
-		reported := s.State.KVUsedTokens
-		if reported == 0 && s.State.KVUsage > 0 && s.KVCapacity > 0 {
-			reported = int64(s.State.KVUsage * float64(s.KVCapacity))
-		}
+		reported := s.ReportedKVUsed()
+		pending := min(rec.PendingKV, math.MaxInt64-reported)
 		if r := reported + pending; r > used {
 			used = r
 		}
@@ -270,27 +335,33 @@ func (w *Worker) Snapshot(now time.Time, staleAfter time.Duration) Snapshot {
 // Reservation is the gateway-side accounting of one request on one worker.
 // Release must be called exactly once (it is idempotent).
 type Reservation struct {
-	w        *Worker
-	kv       int64
-	prefill  int64
-	released atomic.Bool
-	onFree   func()
+	w           *Worker
+	claim       Claim
+	mu          sync.Mutex
+	released    bool
+	prefillDone bool
+	onFree      func()
 }
 
 // Reserve accounts a request on the worker: kvTokens of KV memory (decode
 // side) and prefillTokens of uncached prefill work (prefill side).
 func (w *Worker) Reserve(kvTokens, prefillTokens int64, onFree func()) *Reservation {
-	w.inflight.Add(1)
-	if kvTokens > 0 {
-		w.reservedKV.Add(kvTokens)
-		w.mu.Lock()
-		w.pendingSince += kvTokens
-		w.mu.Unlock()
+	r, _ := w.TryReserve(context.Background(), kvTokens, prefillTokens, Unlimited(), onFree)
+	return r
+}
+
+// TryReserve conditionally reserves capacity at the store's linearization
+// point, not under a process-local scheduler lock.
+func (w *Worker) TryReserve(ctx context.Context, kvTokens, prefillTokens int64, lim Limits, onFree func()) (*Reservation, error) {
+	var id [16]byte
+	if _, err := rand.Read(id[:]); err != nil {
+		return nil, err
 	}
-	if prefillTokens > 0 {
-		w.inflightPrefill.Add(prefillTokens)
+	c := Claim{ID: hex.EncodeToString(id[:]), Requests: 1, KV: max(kvTokens, 0), Prefill: max(prefillTokens, 0)}
+	if err := w.store.Reserve(ctx, w.Ref(), c, lim); err != nil {
+		return nil, err
 	}
-	return &Reservation{w: w, kv: kvTokens, prefill: prefillTokens, onFree: onFree}
+	return &Reservation{w: w, claim: c, onFree: onFree}, nil
 }
 
 // Worker returns the reserved worker.
@@ -298,56 +369,54 @@ func (r *Reservation) Worker() *Worker { return r.w }
 
 // PrefillDone releases the prefill part early (prefill finished, decode
 // continues).
-func (r *Reservation) PrefillDone() {
-	if r == nil || r.prefill == 0 {
-		return
+func (r *Reservation) PrefillDone() error {
+	if r == nil {
+		return nil
 	}
-	if p := r.prefill; p > 0 {
-		r.prefill = 0
-		r.w.inflightPrefill.Add(-p)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.released || r.prefillDone || r.claim.Prefill == 0 {
+		return nil
 	}
+	r.prefillDone = true
+	c := r.claim
+	c.Requests = 0
+	return r.w.store.Release(context.Background(), r.w.Ref(), c)
 }
 
 // Release frees the reservation.
-func (r *Reservation) Release(success bool) {
-	if r == nil || !r.released.CompareAndSwap(false, true) {
-		return
+func (r *Reservation) Release(success bool) error {
+	if r == nil {
+		return nil
 	}
-	r.w.inflight.Add(-1)
-	if r.kv > 0 {
-		r.w.reservedKV.Add(-r.kv)
+	r.mu.Lock()
+	if r.released {
+		r.mu.Unlock()
+		return nil
 	}
-	if r.prefill > 0 {
-		r.w.inflightPrefill.Add(-r.prefill)
-	}
+	r.released = true
+	err := r.w.store.Release(context.Background(), r.w.Ref(), r.claim)
+	r.mu.Unlock()
 	if success {
 		r.w.completed.Add(1)
 	}
 	if r.onFree != nil {
 		r.onFree()
 	}
+	return err
 }
 
 // ReportSuccess resets the failure counter (passive health checking).
 func (w *Worker) ReportSuccess() {
-	w.mu.Lock()
-	w.failures = 0
-	w.mu.Unlock()
+	_, _ = w.store.Health(context.Background(), w.Ref(), false, 0, 0, time.Now())
 }
 
 // ReportFailure records a transport-level failure. After threshold
 // consecutive failures the worker is ejected for cooldown.
 func (w *Worker) ReportFailure(now time.Time, threshold int, cooldown time.Duration) (ejected bool) {
 	w.errors.Add(1)
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.failures++
-	if threshold > 0 && w.failures >= threshold {
-		w.unhealthyTill = now.Add(cooldown)
-		w.failures = 0
-		return true
-	}
-	return false
+	ejected, _ = w.store.Health(context.Background(), w.Ref(), true, threshold, cooldown, now)
+	return ejected
 }
 
 // Counters returns lifetime completed and error counts.

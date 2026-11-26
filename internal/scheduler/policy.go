@@ -5,12 +5,13 @@ import (
 	"math"
 	"math/rand/v2"
 	"sort"
+	"strings"
 	"sync/atomic"
 
 	"github.com/zeebo/xxh3"
 )
 
-// CacheAware is the default policy (modeled on the SGLang router's
+// CacheAware is the legacy threshold policy (modeled on the SGLang router's
 // cache-aware policy, extended with KV/queue load). When load is balanced it
 // routes to the worker with the longest cached prefix if that prefix covers
 // at least CacheThreshold of the prompt; otherwise, and whenever load is
@@ -211,64 +212,57 @@ func rendezvous(key string, cands []*Candidate) []*Candidate {
 
 // PolicyConfig is the declarative form of a policy.
 type PolicyConfig struct {
-	Name           string  `yaml:"policy" json:"policy"`
-	CacheThreshold float64 `yaml:"cache_threshold" json:"cache_threshold"`
-	BalanceAbs     float64 `yaml:"balance_abs_threshold" json:"balance_abs_threshold"`
-	BalanceRel     float64 `yaml:"balance_rel_threshold" json:"balance_rel_threshold"`
-	LoadPenalty    float64 `yaml:"load_penalty" json:"load_penalty"`
-	CacheWeight    float64 `yaml:"cache_weight" json:"cache_weight"`
-	LoadWeight     float64 `yaml:"load_weight" json:"load_weight"`
-	AffinityWeight float64 `yaml:"affinity_weight" json:"affinity_weight"`
-	LoadFactor     float64 `yaml:"load_factor" json:"load_factor"`
-	Fallback       string  `yaml:"fallback" json:"fallback"`
+	Scorers        []ScorerConfig `yaml:"scorers,omitempty" json:"scorers,omitempty"`
+	Name           string         `yaml:"policy" json:"policy"`
+	CacheThreshold float64        `yaml:"cache_threshold" json:"cache_threshold"`
+	BalanceAbs     float64        `yaml:"balance_abs_threshold" json:"balance_abs_threshold"`
+	BalanceRel     float64        `yaml:"balance_rel_threshold" json:"balance_rel_threshold"`
+	LoadPenalty    float64        `yaml:"load_penalty" json:"load_penalty"`
+	CacheWeight    float64        `yaml:"cache_weight" json:"cache_weight"`
+	LoadWeight     float64        `yaml:"load_weight" json:"load_weight"`
+	AffinityWeight float64        `yaml:"affinity_weight" json:"affinity_weight"`
+	LoadFactor     float64        `yaml:"load_factor" json:"load_factor"`
+	Fallback       string         `yaml:"fallback" json:"fallback"`
 }
 
 // BuildPolicy instantiates a policy from configuration. defaultAbs is the
 // role's default absolute imbalance threshold.
 func BuildPolicy(pc PolicyConfig, defaultAbs float64) (Policy, error) {
-	switch pc.Name {
-	case "", "cache_aware":
-		p := &CacheAware{CacheThreshold: pc.CacheThreshold, BalanceAbs: pc.BalanceAbs, BalanceRel: pc.BalanceRel, LoadPenalty: pc.LoadPenalty}
-		if p.CacheThreshold <= 0 {
-			p.CacheThreshold = 0.3
-		}
-		if p.BalanceAbs <= 0 {
-			p.BalanceAbs = defaultAbs
-		}
-		if p.BalanceRel <= 0 {
-			p.BalanceRel = 1.5
-		}
-		if p.LoadPenalty <= 0 {
-			p.LoadPenalty = 0.1
-		}
-		return p, nil
-	case "weighted":
-		p := &Weighted{CacheWeight: pc.CacheWeight, LoadWeight: pc.LoadWeight, AffinityWeight: pc.AffinityWeight}
-		if p.CacheWeight == 0 && p.LoadWeight == 0 && p.AffinityWeight == 0 {
-			p.CacheWeight, p.LoadWeight, p.AffinityWeight = 1, 1, 0.2
-		}
-		return p, nil
-	case "least_load":
-		return LeastLoad{}, nil
-	case "power_of_two":
-		return PowerOfTwo{}, nil
-	case "round_robin":
-		return &RoundRobin{}, nil
-	case "random":
-		return Random{}, nil
-	case "session_affinity":
-		p := &SessionAffinity{LoadFactor: pc.LoadFactor}
-		if p.LoadFactor <= 0 {
-			p.LoadFactor = 0.25
-		}
-		if pc.Fallback != "" && pc.Fallback != "session_affinity" {
-			fb, err := BuildPolicy(PolicyConfig{Name: pc.Fallback, CacheThreshold: pc.CacheThreshold, BalanceAbs: pc.BalanceAbs, BalanceRel: pc.BalanceRel}, defaultAbs)
-			if err != nil {
-				return nil, err
-			}
-			p.Fallback = fb
-		}
-		return p, nil
+	if pc.Name == "" {
+		pc.Name = "weighted"
 	}
-	return nil, fmt.Errorf("unknown scheduling policy %q (want cache_aware, weighted, least_load, power_of_two, round_robin, random or session_affinity)", pc.Name)
+	plugins.RLock()
+	f := plugins.policies[pc.Name]
+	plugins.RUnlock()
+	if f == nil {
+		return nil, fmt.Errorf("unknown scheduling policy %q (registered: %s)", pc.Name, strings.Join(RegisteredPolicies(), ", "))
+	}
+	p, err := f(pc, defaultAbs)
+	if err != nil {
+		return nil, fmt.Errorf("policy %q: %w", pc.Name, err)
+	}
+	if p == nil {
+		return nil, fmt.Errorf("policy %q: factory returned nil", pc.Name)
+	}
+	return p, nil
+}
+
+func buildCacheAware(pc PolicyConfig, defaultAbs float64) (Policy, error) {
+	if pc.Scorers != nil {
+		return nil, fmt.Errorf("cache_aware does not compose scorers; use weighted")
+	}
+	p := &CacheAware{CacheThreshold: pc.CacheThreshold, BalanceAbs: pc.BalanceAbs, BalanceRel: pc.BalanceRel, LoadPenalty: pc.LoadPenalty}
+	if p.CacheThreshold <= 0 {
+		p.CacheThreshold = .3
+	}
+	if p.BalanceAbs <= 0 {
+		p.BalanceAbs = defaultAbs
+	}
+	if p.BalanceRel <= 0 {
+		p.BalanceRel = 1.5
+	}
+	if p.LoadPenalty <= 0 {
+		p.LoadPenalty = .1
+	}
+	return p, nil
 }

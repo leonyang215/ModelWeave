@@ -40,6 +40,15 @@ load. Engines generate and parse their own output.
   derived from their content, so block hashes cover multimodal prompts too.
   Caches are learned from routing, from engine KV events or from an external
   index; load comes from heartbeats or `GetState` polls.
+- **Memory or distributed state.** Use standalone in-process memory, or Redis
+  to share registration, instance load/health/drains, atomic capacity
+  reservations, prefix indexes, sessions and artifact metadata across gateways.
+  Tenant limits and per-model admission queues use the same backend switch:
+  quotas, priorities and weighted fair queueing are global in Redis mode.
+  An engine only needs to heartbeat to one replica.
+- **Pluggable scheduling.** Registered policy/scorer factories; the default
+  weighted composition combines `prefix-cache` and `load` scores with
+  independently configurable weights per model and role.
 - **Traffic control.** Tenants by API key with priorities, request and token
   rate limits, concurrency caps, a fair admission queue and overload
   shedding.
@@ -208,6 +217,10 @@ bin/modelweave-gateway -config configs/gateway.example.yaml
 ```
 
 ## Documentation
+
+- [docs/state-and-scheduling.md](docs/state-and-scheduling.md): memory/Redis
+  state, consistency and failure behaviour, two replicas, scheduling plugins
+  and score weights
 
 - [docs/mwip.md](docs/mwip.md): mwip, the engine protocol: models, roles and
   instances, the Engine and Registry services, the Generate stream, errors,

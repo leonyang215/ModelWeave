@@ -9,10 +9,12 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/leonyang215/ModelWeave/internal/admission"
 	"github.com/leonyang215/ModelWeave/internal/engine"
 	"github.com/leonyang215/ModelWeave/internal/mwip"
 	"github.com/leonyang215/ModelWeave/internal/orchestrator"
 	"github.com/leonyang215/ModelWeave/internal/qos"
+	"github.com/leonyang215/ModelWeave/internal/registry"
 	"github.com/leonyang215/ModelWeave/internal/scheduler"
 	"github.com/leonyang215/ModelWeave/internal/tokenizer"
 )
@@ -103,6 +105,10 @@ func classify(err error) *apiError {
 		return &apiError{Status: http.StatusGatewayTimeout, Kind: "timeout", Message: err.Error()}
 	case errors.Is(err, orchestrator.ErrIdleTimeout):
 		return &apiError{Status: http.StatusGatewayTimeout, Kind: "timeout", Message: err.Error()}
+	case errors.Is(err, registry.ErrStoreUnavailable):
+		return &apiError{Status: http.StatusServiceUnavailable, Kind: "state_store_unavailable", Message: "shared state store is unavailable", RetryAfter: time.Second}
+	case errors.Is(err, admission.ErrTurnLost), errors.Is(err, qos.ErrClosed):
+		return &apiError{Status: http.StatusServiceUnavailable, Kind: "admission_unavailable", Message: "admission turn is no longer available", RetryAfter: time.Second}
 	}
 	var ee *engine.Error
 	if errors.As(err, &ee) {

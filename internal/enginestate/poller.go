@@ -18,8 +18,9 @@ type StateFunc func(ctx context.Context, spec registry.Spec) (registry.EngineSta
 
 // Options configure a poller.
 type Options struct {
-	Timeout time.Duration
-	State   StateFunc
+	Timeout  time.Duration
+	Interval time.Duration // shared poll lease; default 2s
+	State    StateFunc
 	// OnResult reports every poll: outcome is "ok" or "error".
 	OnResult func(outcome string)
 }
@@ -35,11 +36,20 @@ func NewPoller(reg *registry.Registry, opts Options) *Poller {
 	if opts.Timeout <= 0 {
 		opts.Timeout = time.Second
 	}
+	if opts.Interval <= 0 {
+		opts.Interval = 2 * time.Second
+	}
 	return &Poller{reg: reg, opts: opts}
 }
 
 // PollAll polls every instance concurrently (at most 32 at a time).
 func (p *Poller) PollAll(ctx context.Context) {
+	if err := p.reg.Sync(ctx); err != nil {
+		if p.opts.OnResult != nil {
+			p.opts.OnResult("error")
+		}
+		return
+	}
 	sem := make(chan struct{}, 32)
 	var wg sync.WaitGroup
 	for _, w := range p.reg.All() {
@@ -48,12 +58,29 @@ func (p *Poller) PollAll(ctx context.Context) {
 		go func(w *registry.Worker) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			st, err := p.Fetch(ctx, w.Spec())
+			if p.reg.Store().Shared() {
+				claimed, err := p.reg.Store().Claim(ctx, "state:"+w.CacheKey(), max(p.opts.Interval, p.opts.Timeout))
+				if err != nil {
+					if p.opts.OnResult != nil {
+						p.opts.OnResult("error")
+					}
+					return
+				}
+				if !claimed {
+					return
+				}
+			}
+			snap, err := w.SnapshotContext(ctx, time.Now(), 0)
+			var st registry.EngineState
+			if err == nil && !snap.Gone {
+				st, err = p.Fetch(ctx, snap.Spec)
+			}
+			if err == nil && !snap.Gone {
+				err = w.UpdateStateIfRevision(ctx, st, time.Now(), snap.Revision)
+			}
 			outcome := "ok"
 			if err != nil {
 				outcome = "error"
-			} else {
-				w.UpdateState(st, time.Now())
 			}
 			if p.opts.OnResult != nil {
 				p.opts.OnResult(outcome)

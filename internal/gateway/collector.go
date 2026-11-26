@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"errors"
 	"time"
 
@@ -43,8 +44,16 @@ func (c *workerCollector) Describe(ch chan<- *prometheus.Desc) {
 
 func (c *workerCollector) Collect(ch chan<- prometheus.Metric) {
 	now := time.Now()
-	for _, w := range c.reg.All() {
-		s := w.Snapshot(now, c.staleAfter)
+	ws := c.reg.All()
+	snaps, err := c.reg.Snapshots(context.Background(), ws, now, c.staleAfter)
+	if err != nil {
+		return
+	}
+	for i, w := range ws {
+		s := snaps[i]
+		if s.Gone {
+			continue
+		}
 		lv := []string{s.Spec.ID, s.Spec.Model, string(s.Spec.Role)}
 		up := 0.0
 		if s.Healthy && !s.Draining {

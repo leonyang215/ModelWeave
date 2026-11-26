@@ -63,6 +63,14 @@ open http://127.0.0.1:39090
 Per-worker series (labels `worker`, `model`, `role`) are produced at scrape
 time from the registry:
 
+With `state.backend: redis`, worker capacity/load/reservation gauges are
+**global shared values**: do not sum them over gateway replicas. Worker
+completion/error counters, request/rejection counters and latency remain local
+to each gateway. Tenant balances/concurrency and queue-depth gauges are shared
+in Redis mode too: do not sum these gauges across replicas. `/admin/stats`
+includes `state_backend`, `qos_backend`, global tenant/queue state and the
+active scorer names/weights for every model/role.
+
 | Metric | Meaning |
 |---|---|
 | `modelweave_worker_up` | 1 when healthy and not draining |

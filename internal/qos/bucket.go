@@ -58,7 +58,7 @@ func (b *Bucket) Take(n float64) (bool, time.Duration) {
 	if b.rate <= 0 {
 		return false, time.Hour
 	}
-	wait := time.Duration((need - b.tokens) / b.rate * float64(time.Second))
+	wait := time.Duration(math.Min((need-b.tokens)/b.rate*float64(time.Second), float64(24*time.Hour)))
 	return false, wait
 }
 

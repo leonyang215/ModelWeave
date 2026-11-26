@@ -22,6 +22,7 @@ import (
 	"github.com/leonyang215/ModelWeave/internal/obs"
 	"github.com/leonyang215/ModelWeave/internal/orchestrator"
 	"github.com/leonyang215/ModelWeave/internal/qos"
+	"github.com/leonyang215/ModelWeave/internal/redisstate"
 	"github.com/leonyang215/ModelWeave/internal/registry"
 	"github.com/leonyang215/ModelWeave/internal/scheduler"
 	"github.com/leonyang215/ModelWeave/internal/tokenizer"
@@ -30,29 +31,31 @@ import (
 type modelRT struct {
 	cfg      *config.Model
 	rt       *orchestrator.Model
-	queue    *qos.Queue
+	queue    qos.AdmissionQueue
 	overload *qos.Overload
 }
 
 // Server is the gateway.
 type Server struct {
-	cfg     *config.Config
-	log     *slog.Logger
-	met     *obs.Metrics
-	reg     *registry.Registry
-	tok     *tokenizer.Client
-	eng     *engine.Client
-	orch    *orchestrator.Orchestrator
-	limiter *qos.Limiter
-	keys    map[string]string // api key -> tenant
-	tenants map[string]config.Tenant
-	index   kvindex.Index
-	events  kvindex.EventSink
-	models  map[string]*modelRT // canonical name
-	byName  map[string]*modelRT // name or alias
-	ready   atomic.Bool
-	version string
-	wg      sync.WaitGroup
+	cfg        *config.Config
+	log        *slog.Logger
+	met        *obs.Metrics
+	reg        *registry.Registry
+	tok        *tokenizer.Client
+	eng        *engine.Client
+	orch       *orchestrator.Orchestrator
+	limiter    qos.TenantLimiter
+	qosBackend qos.Backend
+	keys       map[string]string // api key -> tenant
+	tenants    map[string]config.Tenant
+	index      kvindex.Index
+	events     kvindex.EventSink
+	models     map[string]*modelRT // canonical name
+	byName     map[string]*modelRT // name or alias
+	ready      atomic.Bool
+	version    string
+	wg         sync.WaitGroup
+	closeOnce  sync.Once
 }
 
 // Default absolute load-imbalance thresholds per role, in the role's load
@@ -66,13 +69,26 @@ var defaultBalanceAbs = map[registry.Role]float64{
 
 // New builds a gateway from configuration.
 func New(cfg *config.Config, log *slog.Logger, version string) (*Server, error) {
+	var store registry.Store = registry.NewMemoryStore()
+	var shared *redisstate.Store
+	if cfg.State.Backend == "redis" {
+		var err error
+		shared, err = redisstate.New(context.Background(), redisstate.Options{
+			URL: cfg.State.Redis.URL, Namespace: cfg.State.Redis.Namespace,
+			Timeout: cfg.State.Redis.Timeout.D(), LeaseTTL: cfg.State.Redis.LeaseTTL.D(),
+		})
+		if err != nil {
+			return nil, err
+		}
+		store = shared
+	}
 	met := obs.NewMetrics()
 	met.BuildInfo.WithLabelValues(version).Set(1)
 	s := &Server{
 		cfg:     cfg,
 		log:     log,
 		met:     met,
-		reg:     registry.New(cfg.Discovery.HeartbeatTTL.D()),
+		reg:     registry.NewWithStore(cfg.Discovery.HeartbeatTTL.D(), store),
 		tok:     tokenizer.New(cfg.Tokenizer.Endpoints, cfg.Tokenizer.Timeout.D()),
 		eng:     engine.New(),
 		keys:    map[string]string{},
@@ -80,6 +96,17 @@ func New(cfg *config.Config, log *slog.Logger, version string) (*Server, error) 
 		models:  map[string]*modelRT{},
 		byName:  map[string]*modelRT{},
 		version: version,
+	}
+	constructed := false
+	defer func() {
+		if !constructed {
+			s.Close()
+		}
+	}()
+	if shared != nil {
+		if err := shared.CheckSettings(context.Background(), cfg.Discovery.HeartbeatTTL.D(), cfg.KVIndex.BlockSize); err != nil {
+			return nil, err
+		}
 	}
 	s.orch = orchestrator.New(s.reg, s.eng, met, log, cfg.Health, cfg.Server)
 	s.tok.OnUnreachable = func(endpoint string, err error) {
@@ -96,21 +123,40 @@ func New(cfg *config.Config, log *slog.Logger, version string) (*Server, error) 
 			s.keys[k] = t.Name
 		}
 	}
-	s.limiter = qos.NewLimiter(policies)
+	s.qosBackend = qos.NewMemoryBackend(policies)
+	if shared != nil {
+		var err error
+		s.qosBackend, err = qos.NewRedisBackend(context.Background(), shared, policies)
+		if err != nil {
+			return nil, err
+		}
+	}
+	s.limiter = s.qosBackend.Limiter()
 
 	ki := cfg.KVIndex
 	capacity := ki.CapacityBlocks
+	approx := func() kvindex.Index {
+		if shared != nil {
+			return kvindex.NewRedis(shared.Client, shared.Key("prefix:"), kvindex.RedisOptions{Type: "approx", TTL: ki.TTL.D(), CapacityBlocks: capacity, Timeout: cfg.State.Redis.Timeout.D(), OnError: func(err error) { log.Warn("shared prefix index mutation failed", "error", err) }})
+		}
+		return kvindex.NewApprox(ki.TTL.D(), capacity)
+	}
 	switch ki.Type {
 	case "approx":
-		s.index = kvindex.NewApprox(ki.TTL.D(), capacity)
+		s.index = approx()
 	case "events":
-		ev := kvindex.NewEvents(ki.OptimisticTTL.D())
-		s.index, s.events = ev, ev
+		if shared != nil {
+			ev := kvindex.NewRedis(shared.Client, shared.Key("prefix:"), kvindex.RedisOptions{Type: "events", OptimisticTTL: ki.OptimisticTTL.D(), Timeout: cfg.State.Redis.Timeout.D(), OnError: func(err error) { log.Warn("shared KV index mutation failed", "error", err) }})
+			s.index, s.events = ev, ev
+		} else {
+			ev := kvindex.NewEvents(ki.OptimisticTTL.D())
+			s.index, s.events = ev, ev
+		}
 	case "remote":
 		s.index = &kvindex.Remote{
 			URL: ki.RemoteURL, Timeout: ki.RemoteTimeout.D(),
 			Client:   &http.Client{Transport: &http.Transport{MaxIdleConnsPerHost: 64, IdleConnTimeout: 90 * time.Second}},
-			Fallback: kvindex.NewApprox(ki.TTL.D(), capacity),
+			Fallback: approx(),
 			OnResult: func(outcome string, d time.Duration) {
 				met.CacheLookup.WithLabelValues("remote_"+outcome, outcome).Observe(d.Seconds())
 			},
@@ -128,7 +174,8 @@ func New(cfg *config.Config, log *slog.Logger, version string) (*Server, error) 
 			}
 			return scheduler.New(s.reg, scheduler.Config{
 				Policy: pol, Index: s.index, StaleAfter: cfg.EngineState.StaleAfter.D(),
-				Observer: &schedObserver{met: met, model: mc.Name},
+				Observer:         &schedObserver{met: met, model: mc.Name},
+				RegistrationKeys: true,
 			}), nil
 		}
 		rt := &orchestrator.Model{
@@ -139,6 +186,11 @@ func New(cfg *config.Config, log *slog.Logger, version string) (*Server, error) 
 			Artifacts: orchestrator.NewArtifactCache(mc.Encode.ArtifactCacheTTL.D(), mc.Encode.ArtifactCacheMax),
 			Sessions:  orchestrator.NewSessionMap(mc.Normal.SessionTTL.D()),
 		}
+		if shared != nil {
+			onError := func(err error) { log.Warn("shared advisory cache unavailable", "model", mc.Name, "error", err) }
+			rt.Sessions = orchestrator.NewRedisSessionMap(shared, mc.Name, mc.Normal.SessionTTL.D(), onError)
+			rt.Artifacts = orchestrator.NewRedisArtifactCache(shared, mc.Name, mc.Encode.ArtifactCacheTTL.D(), mc.Encode.ArtifactCacheMax, onError)
+		}
 		log.Info("model configured", "model", mc.Name, "mode", mc.Mode, "pd_handshake", mc.PD.Handshake)
 		met.ModelInfo.WithLabelValues(mc.Name, mc.Mode, mc.PD.Handshake).Set(1)
 		var err error
@@ -148,18 +200,22 @@ func New(cfg *config.Config, log *slog.Logger, version string) (*Server, error) 
 		if rt.Decode, err = build(registry.RoleDecode, mc.Routing.Decode); err != nil {
 			return nil, err
 		}
-		if rt.Encode, err = build(registry.RoleEncode, defaultPolicy(mc.Routing.Encode, "least_load")); err != nil {
+		if rt.Encode, err = build(registry.RoleEncode, defaultPolicy(mc.Routing.Encode, "load")); err != nil {
 			return nil, err
 		}
 		if rt.Unified, err = build(registry.RoleUnified, mc.Routing.Unified); err != nil {
 			return nil, err
 		}
+		queue, err := s.qosBackend.NewQueue(context.Background(), mc.Name, qos.QueueConfig{
+			MaxSize: mc.Admission.QueueSize, MaxWait: mc.Admission.MaxWait.D(), BackfillDepth: mc.Admission.BackfillDepth,
+		}, &queueObserver{met: met, model: mc.Name})
+		if err != nil {
+			return nil, err
+		}
 		m := &modelRT{
-			cfg: mc,
-			rt:  rt,
-			queue: qos.NewQueue(qos.QueueConfig{
-				MaxSize: mc.Admission.QueueSize, MaxWait: mc.Admission.MaxWait.D(), BackfillDepth: mc.Admission.BackfillDepth,
-			}, &queueObserver{met: met, model: mc.Name}),
+			cfg:      mc,
+			rt:       rt,
+			queue:    queue,
 			overload: qos.NewOverload(mc.Admission.Overload.Thresholds, mc.Admission.Overload.Hysteresis, mc.Admission.Overload.CacheExemptRatio),
 		}
 		s.models[mc.Name] = m
@@ -171,23 +227,33 @@ func New(cfg *config.Config, log *slog.Logger, version string) (*Server, error) 
 
 	s.reg.OnChange(func(ev registry.Event) {
 		spec := ev.Worker.Spec()
+		forget := func(w *registry.Worker) {
+			s.index.ForgetWorker(w.CacheKey())
+			if m := s.models[w.Spec().Model]; m != nil {
+				m.rt.Sessions.ForgetWorker(w.CacheKey())
+				m.queue.Notify()
+			}
+		}
+		if ev.Previous != nil && ev.Previous.Ref() != ev.Worker.Ref() {
+			forget(ev.Previous)
+		}
 		switch ev.Kind {
 		case "removed":
-			s.index.ForgetWorker(spec.ID)
-			if m := s.models[spec.Model]; m != nil {
-				m.rt.Sessions.ForgetWorker(spec.ID)
-			}
+			forget(ev.Worker)
 			s.log.Info("worker removed", "worker", spec.ID, "model", spec.Model, "role", spec.Role)
 		case "added", "updated":
 			if spec.KVCapacityTokens > 0 && ki.BlockSize > 0 && capacity == 0 {
-				s.index.SetWorkerCapacity(spec.ID, int(spec.KVCapacityTokens)/ki.BlockSize)
+				s.index.SetWorkerCapacity(ev.Worker.CacheKey(), int(spec.KVCapacityTokens)/ki.BlockSize)
 			}
-			s.log.Info("worker "+ev.Kind, "worker", spec.ID, "model", spec.Model, "role", spec.Role, "target", spec.Target, "source", ev.Worker.Source)
+			s.log.Info("worker "+ev.Kind, "worker", spec.ID, "model", spec.Model, "role", spec.Role, "target", spec.Target, "source", ev.Worker.Source())
 		}
 		if m := s.models[spec.Model]; m != nil {
 			m.queue.Notify()
 		}
 	})
+	if err := s.reg.Sync(context.Background()); err != nil {
+		return nil, err
+	}
 	for _, w := range cfg.Discovery.Workers {
 		w.Model = s.byName[w.Model].cfg.Name
 		if _, _, err := s.reg.Upsert(w, "static"); err != nil {
@@ -196,11 +262,33 @@ func New(cfg *config.Config, log *slog.Logger, version string) (*Server, error) 
 	}
 	met.Registry.MustRegister(&workerCollector{reg: s.reg, staleAfter: cfg.EngineState.StaleAfter.D()})
 	s.ready.Store(true)
+	constructed = true
 	return s, nil
 }
 
+// Close releases resources of a stopped server (also useful with Handler in
+// embedded deployments/tests). Run calls it after draining and stopping its
+// background tasks. Closing one Redis gateway never clears shared state.
+func (s *Server) Close() {
+	s.closeOnce.Do(func() {
+		s.ready.Store(false)
+		for _, m := range s.models {
+			m.queue.Close()
+		}
+		if s.qosBackend != nil {
+			s.qosBackend.Close()
+		}
+		if s.eng != nil {
+			s.eng.Close()
+		}
+		if s.reg != nil {
+			_ = s.reg.Store().Close()
+		}
+	})
+}
+
 func defaultPolicy(pc scheduler.PolicyConfig, name string) scheduler.PolicyConfig {
-	if pc.Name == "" {
+	if pc.Name == "" && pc.Scorers == nil {
 		pc.Name = name
 	}
 	return pc
@@ -218,10 +306,20 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /admin/stats", s.control(s.handleStats))
 	mux.Handle("GET /metrics", promhttp.HandlerFor(s.met.Registry, promhttp.HandlerOpts{}))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok")) })
-	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
 		if !s.ready.Load() {
 			http.Error(w, "draining", http.StatusServiceUnavailable)
 			return
+		}
+		if s.reg.Store().Shared() {
+			if err := s.reg.Store().Maintain(r.Context()); err != nil {
+				http.Error(w, "state store unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			if err := s.qosBackend.Maintain(r.Context()); err != nil {
+				http.Error(w, "QoS state store unavailable", http.StatusServiceUnavailable)
+				return
+			}
 		}
 		_, _ = w.Write([]byte("ready"))
 	})
@@ -232,7 +330,7 @@ func (s *Server) Handler() http.Handler {
 // canceled, then drains.
 func (s *Server) Run(ctx context.Context) error {
 	bg, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	defer func() { cancel(); s.wg.Wait(); s.Close() }()
 	s.startBackground(bg)
 	srv := &http.Server{
 		Addr:              s.cfg.Server.Listen,
@@ -271,7 +369,6 @@ func (s *Server) Run(ctx context.Context) error {
 		gsrv.Stop()
 	}
 	cancel()
-	defer s.eng.Close()
 	for _, m := range s.models {
 		m.queue.Close()
 	}
@@ -300,11 +397,32 @@ func (s *Server) startBackground(ctx context.Context) {
 		}()
 	}
 	every(time.Second, func() {
-		for _, spec := range s.reg.Sweep() {
+		specs, err := s.reg.SweepContext(ctx)
+		if err != nil {
+			s.log.Warn("registry expiry failed", "error", err)
+			return
+		}
+		for _, spec := range specs {
 			s.met.InstanceRemovals.WithLabelValues(spec.Model, string(spec.Role), "expired").Inc()
 			s.log.Warn("instance expired: no heartbeat", "worker", spec.ID, "model", spec.Model, "role", spec.Role, "ttl", s.reg.TTL().String())
 		}
 	})
+	if s.reg.Store().Shared() {
+		every(s.cfg.State.SyncInterval.D(), func() {
+			if err := s.reg.Sync(ctx); err != nil {
+				s.log.Warn("registry sync failed", "error", err)
+			}
+		})
+		every(min(time.Second, s.cfg.State.Redis.LeaseTTL.D()/3), func() {
+			if err := s.reg.Store().Maintain(ctx); err != nil {
+				s.log.Error("shared state maintenance failed", "error", err)
+				return
+			}
+			if err := s.qosBackend.Maintain(ctx); err != nil {
+				s.log.Error("QoS state maintenance failed", "error", err)
+			}
+		})
+	}
 	every(30*time.Second, func() {
 		switch ix := s.index.(type) {
 		case *kvindex.Approx:
@@ -316,7 +434,7 @@ func (s *Server) startBackground(ctx context.Context) {
 	every(time.Second, s.updateOverload)
 	if p := s.cfg.EngineState.Poll; p.Enabled {
 		poller := enginestate.NewPoller(s.reg, enginestate.Options{
-			Timeout: p.Timeout.D(), State: s.eng.State,
+			Timeout: p.Timeout.D(), Interval: p.Interval.D(), State: s.eng.State,
 			OnResult: func(outcome string) { s.met.StatePolls.WithLabelValues(outcome).Inc() },
 		})
 		every(p.Interval.D(), func() { poller.PollAll(ctx) })
@@ -364,7 +482,9 @@ func (s *Server) updateOverload() {
 			util = max(util, u)
 		}
 		if qmax := m.cfg.Admission.QueueSize; qmax > 0 {
-			util = max(util, float64(m.queue.Len())/float64(qmax))
+			if size, err := m.queue.LenContext(context.Background()); err == nil {
+				util = max(util, float64(size)/float64(qmax))
+			}
 		}
 		level := m.overload.Update(util)
 		s.met.OverloadLevel.WithLabelValues(name).Set(float64(level))
