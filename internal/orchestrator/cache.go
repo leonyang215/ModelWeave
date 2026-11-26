@@ -2,7 +2,6 @@ package orchestrator
 
 import (
 	"container/list"
-	"fmt"
 	"sync"
 	"time"
 
@@ -12,8 +11,8 @@ import (
 // ArtifactStore and SessionStore select local or shared advisory caches.
 // A backend error is a cache miss, never permission to skip capacity checks.
 type ArtifactStore interface {
-	Get(string) ([]mwip.EmbeddingArtifact, bool)
-	Put(string, []mwip.EmbeddingArtifact)
+	Get(string) (mwip.EmbeddingLocation, bool)
+	Put(string, mwip.EmbeddingLocation)
 	Invalidate(...string)
 	Len() int
 }
@@ -27,9 +26,8 @@ type SessionStore interface {
 }
 
 // ArtifactCache maps media digests to the embedding artifacts the encode
-// stage built for them (one per placement: an image, or each kept frame of
-// a video). Artifacts are content addressed, so a hit can be reused by any
-// request carrying the same media with the same plan.
+// stage built for them (one packed tensor per item). Entries are identified
+// by the complete content+plan fingerprint, never prompt offsets or hints.
 type ArtifactCache struct {
 	mu    sync.Mutex
 	ttl   time.Duration
@@ -40,9 +38,9 @@ type ArtifactCache struct {
 }
 
 type artifactEntry struct {
-	key     string
-	arts    []mwip.EmbeddingArtifact
-	expires time.Time
+	key       string
+	embedding mwip.EmbeddingLocation
+	expires   time.Time
 }
 
 // NewArtifactCache returns a cache bounded by ttl and max entries.
@@ -51,41 +49,40 @@ func NewArtifactCache(ttl time.Duration, max int) *ArtifactCache {
 }
 
 // ArtifactKey identifies the artifacts of an item: its digest and plan (a
-// different pixel control gives different embeddings).
+// different resize, processor or exact frame selection gives a different key).
 func ArtifactKey(it *mwip.MediaItem) string {
-	return fmt.Sprintf("%s/%dx%d/%d/%d", it.Digest, it.Plan.Width, it.Plan.Height, it.Plan.Tokens, len(it.Placements))
+	return it.PlanID
 }
 
 // Get returns the artifacts of key.
-func (c *ArtifactCache) Get(key string) ([]mwip.EmbeddingArtifact, bool) {
+func (c *ArtifactCache) Get(key string) (mwip.EmbeddingLocation, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	e, ok := c.items[key]
 	if !ok {
-		return nil, false
+		return mwip.EmbeddingLocation{}, false
 	}
 	ent := e.Value.(*artifactEntry)
 	if c.now().After(ent.expires) {
 		c.lru.Remove(e)
 		delete(c.items, key)
-		return nil, false
+		return mwip.EmbeddingLocation{}, false
 	}
 	c.lru.MoveToFront(e)
-	return append([]mwip.EmbeddingArtifact(nil), ent.arts...), true
+	return ent.embedding, true
 }
 
 // Put stores the artifacts of key.
-func (c *ArtifactCache) Put(key string, arts []mwip.EmbeddingArtifact) {
+func (c *ArtifactCache) Put(key string, embedding mwip.EmbeddingLocation) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	arts = append([]mwip.EmbeddingArtifact(nil), arts...)
 	if e, ok := c.items[key]; ok {
 		ent := e.Value.(*artifactEntry)
-		ent.arts, ent.expires = arts, c.now().Add(c.ttl)
+		ent.embedding, ent.expires = embedding, c.now().Add(c.ttl)
 		c.lru.MoveToFront(e)
 		return
 	}
-	c.items[key] = c.lru.PushFront(&artifactEntry{key: key, arts: arts, expires: c.now().Add(c.ttl)})
+	c.items[key] = c.lru.PushFront(&artifactEntry{key: key, embedding: embedding, expires: c.now().Add(c.ttl)})
 	for c.max > 0 && c.lru.Len() > c.max {
 		last := c.lru.Back()
 		c.lru.Remove(last)

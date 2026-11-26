@@ -92,20 +92,19 @@ func (s *Stage) request() *mwip.GenerateRequest {
 	}
 }
 
-// EncodeStage asks an encode instance for the embeddings of media items.
+// EncodeStage asks an encode instance to execute one item's frozen plan.
 type EncodeStage struct {
 	RequestID   string
 	AttemptID   string
 	Model       string
 	EngineModel string
-	Items       []mwip.MediaItem
+	Item        *mwip.MediaInput
 	TimeoutMS   int64
 }
 
-// EncodeResult is what an encode instance returned: one artifact per
-// placement.
+// EncodeResult locates one packed item embedding, readable by P and D.
 type EncodeResult struct {
-	Artifacts []mwip.EmbeddingArtifact
+	Embedding *mwip.EmbeddingLocation
 	EncodeMS  float64
 }
 
@@ -191,12 +190,18 @@ func (c *Client) Generate(ctx context.Context, spec registry.Spec, st *Stage) (*
 
 // Encode runs Engine.Encode on an encode instance.
 func (c *Client) Encode(ctx context.Context, spec registry.Spec, st *EncodeStage) (*EncodeResult, error) {
+	if st.Item == nil {
+		return nil, &Error{Role: "encode", WorkerID: spec.ID, Code: mwip.ErrBadRequest, Message: "Encode requires one item"}
+	}
+	if err := st.Item.Validate(); err != nil {
+		return nil, &Error{Role: "encode", WorkerID: spec.ID, Code: mwip.ErrBadRequest, Message: err.Error()}
+	}
 	ec, err := c.engine("encode", spec)
 	if err != nil {
 		return nil, err
 	}
 	resp, err := ec.Encode(ctx, mwip.EncodeRequestToProto(&mwip.EncodeRequest{
-		RequestID: st.RequestID, AttemptID: st.AttemptID, Model: st.Model, Items: st.Items, TimeoutMS: st.TimeoutMS,
+		RequestID: st.RequestID, AttemptID: st.AttemptID, Model: st.EngineModel, Item: st.Item, TimeoutMS: st.TimeoutMS,
 	}))
 	if err != nil {
 		if ctx.Err() != nil {
@@ -204,7 +209,12 @@ func (c *Client) Encode(ctx context.Context, spec registry.Spec, st *EncodeStage
 		}
 		return nil, statusErr("encode", spec.ID, err)
 	}
-	return &EncodeResult{Artifacts: mwip.ArtifactsFromProto(resp.GetArtifacts()), EncodeMS: resp.GetEncodeMs()}, nil
+	embedding := mwip.EmbeddingFromProto(resp.GetEmbedding())
+	if err := st.Item.ValidateEmbedding(embedding); err != nil {
+		return nil, &Error{Role: "encode", WorkerID: spec.ID, Code: mwip.ErrInternal, Message: "invalid encoder result: " + err.Error(), Retriable: true}
+	}
+	embedding.Encoder = spec.ID
+	return &EncodeResult{Embedding: embedding, EncodeMS: resp.GetEncodeMs()}, nil
 }
 
 // Abort asks an instance to stop a request (Engine.Abort). It is best

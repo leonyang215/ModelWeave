@@ -17,19 +17,19 @@ func TestTokenizerImagePlan(t *testing.T) {
 	if status != 200 {
 		t.Fatalf("render: %d %v", status, rr)
 	}
-	if path(rr, "multimodal", "placeholder_token_id") != float64(129264) || path(rr, "multimodal", "pad_shift") != float64(1<<30) {
+	if path(rr, "multimodal", "placeholder_token_id") != nil || path(rr, "multimodal", "pad_shift") != float64(1<<30) {
 		t.Fatalf("multimodal header: %v", rr["multimodal"])
 	}
 	it := mediaItem(t, rr, 0)
 	ps := checkPlacements(t, rr, it)
 	plan := it["plan"].(map[string]any)
 	if it["modality"] != "image" || it["digest"] != dataURLDigest(t, img) || path(it, "source", "kind") != "base64" ||
-		path(it, "metadata", "width") != float64(320) || path(it, "metadata", "height") != float64(240) {
+		it["metadata"] != nil || it["placeholder"] != nil || plan["processor"] != "deepseek_v4_1.v1" {
 		t.Fatalf("item: %v", it)
 	}
-	if len(ps) != 1 || ps[0]["reference"] != it["digest"] || ps[0]["modality"] != "image" ||
-		ps[0]["length"] != plan["tokens"] || path(it, "span", "length") != plan["tokens"] || plan["tokens"].(float64) < 50 {
-		t.Fatalf("plan %v placements %v span %v", plan, ps, it["span"])
+	if len(ps) != 1 || ps[0]["reference"] != it["plan_id"] || ps[0]["modality"] != "image" ||
+		ps[0]["length"] != plan["tokens"] || it["span"] != nil || plan["tokens"].(float64) < 50 {
+		t.Fatalf("plan %v placements %v", plan, ps)
 	}
 	// The same bytes always give the same tokens (prefix caching).
 	_, again := render(t, "chat_completions", userBlocks("deepseek-v4.1", text("Describe"), map[string]any{"type": "image_url", "image_url": map[string]any{"url": img}}))
@@ -87,7 +87,7 @@ func TestTokenizerPixelControls(t *testing.T) {
 }
 
 // A video becomes its kept frames: each frame is its timestamp text plus a
-// pad region whose reference is "{digest}_kf_{k:04}".
+// pad region whose reference is "{plan_id}_kf_{k:04}".
 func TestTokenizerVideoPlan(t *testing.T) {
 	digest := sha256Hex([]byte("e2e-video"))
 	status, rr := render(t, "chat_completions", userBlocks("deepseek-v4.1", text("What happens?"),
@@ -98,15 +98,20 @@ func TestTokenizerVideoPlan(t *testing.T) {
 	it := mediaItem(t, rr, 0)
 	ps := checkPlacements(t, rr, it)
 	plan := it["plan"].(map[string]any)
-	if it["modality"] != "video" || plan["nframes"] != float64(10) || plan["kept_frames"] != float64(10) || len(ps) != 10 {
+	if it["modality"] != "video" || plan["nframes"] != float64(10) || len(plan["frame_indices"].([]any)) != 10 || plan["temporal_patch_size"] != float64(1) || len(ps) != 10 {
 		t.Fatalf("video plan %v, %d placements", plan, len(ps))
 	}
 	ids := rr["token_ids"].([]any)
-	spanStart := int(path(it, "span", "offset").(float64))
+	tsBody := map[string]any{"model": "deepseek-v4.1", "text": fmt.Sprintf("%.1f seconds", ps[0]["timestamp"].(float64)), "parse_special": false}
+	tsReply := post(t, tokURL, "/v1/tokenize_text", "", tsBody, nil)
+	if tsReply.status != 200 {
+		t.Fatalf("timestamp tokenize: %s", tsReply.body)
+	}
+	spanStart := int(ps[0]["offset"].(float64)) - len(tsReply.json(t)["token_ids"].([]any))
 	prevEnd, prevTS := spanStart, -1.0
 	for k, p := range ps {
 		ts := p["timestamp"].(float64)
-		if p["reference"] != fmt.Sprintf("%s_kf_%04d", digest, k) || p["modality"] != "frame" || p["length"] != plan["tokens"] || ts <= prevTS {
+		if p["reference"] != fmt.Sprintf("%s_kf_%04d", it["plan_id"], k) || p["modality"] != "frame" || p["length"] != plan["tokens"] || ts <= prevTS {
 			t.Fatalf("frame %d: %v", k, p)
 		}
 		off := int(p["offset"].(float64))
@@ -115,10 +120,7 @@ func TestTokenizerVideoPlan(t *testing.T) {
 		}
 		prevEnd, prevTS = off+int(p["length"].(float64)), ts
 	}
-	if spanStart+int(path(it, "span", "length").(float64)) != prevEnd {
-		t.Fatalf("span %v does not end at the last frame (%d)", it["span"], prevEnd)
-	}
-	t.Logf("10 s video at fps 1: %v kept frames of %v tokens, %v prompt tokens", plan["kept_frames"], plan["tokens"], rr["prompt_tokens"])
+	t.Logf("10 s video at fps 1: %d groups of %v tokens, %v prompt tokens", len(ps), plan["tokens"], rr["prompt_tokens"])
 
 	// nframes fixes the frame count. Frames default to a 672 px long side;
 	// the frame pixel controls replace that (V4.1 never goes below 544² px,
@@ -126,7 +128,7 @@ func TestTokenizerVideoPlan(t *testing.T) {
 	_, fixed := render(t, "chat_completions", userBlocks("deepseek-v4.1",
 		remoteVideo("https://video.example/clip.mp4", digest, map[string]any{"nframes": 4, "pixel_control_options": map[string]any{"max_long_side": 1344}})))
 	fp := path(mediaItem(t, fixed, 0), "plan").(map[string]any)
-	if fp["kept_frames"] != float64(4) || fp["tokens"].(float64) <= plan["tokens"].(float64) || fmt.Sprint(fp["timestamps"]) != "[0 2.5 5 7.5]" {
+	if fp["nframes"] != float64(4) || len(fp["frame_indices"].([]any)) != 4 || fp["tokens"].(float64) <= plan["tokens"].(float64) || fmt.Sprint(fp["timestamps"]) != "[0 2.5 5 7.5]" {
 		t.Fatalf("nframes=4, max_long_side=1344: %v", fp)
 	}
 	t.Logf("nframes=4, max_long_side=1344: %vx%v, %v tokens per frame", fp["width"], fp["height"], fp["tokens"])
@@ -145,14 +147,13 @@ func TestTokenizerVideoPlan(t *testing.T) {
 			"metadata": remoteVideo("", digest, nil)["metadata"], "frame_extract_options": map[string]any{"fps": 1}},
 	}}}})
 	for name, out := range map[string]map[string]any{"messages": msg, "responses": resp} {
-		if p := path(mediaItem(t, out, 0), "plan").(map[string]any); p["kept_frames"] != float64(10) || p["tokens"] != plan["tokens"] {
+		if p := path(mediaItem(t, out, 0), "plan").(map[string]any); len(p["frame_indices"].([]any)) != 10 || p["tokens"] != plan["tokens"] {
 			t.Fatalf("%s video plan %v", name, p)
 		}
 	}
 }
 
-// mwip EPD: the gateway encodes on enc-0, attaches one embedding artifact per
-// placement to the intermediate state, and caches the artifacts by digest.
+// mwip EPD: one input item yields one packed location, cached by content+plan.
 func TestEPDImage(t *testing.T) {
 	img := tinyPNG(320, 240, byte(time.Now().UnixNano()), 40, 200)
 	body := userBlocks("deepseek-v4.1", text("What is in this image?"), map[string]any{"type": "image_url", "image_url": map[string]any{"url": img}})
@@ -177,9 +178,9 @@ func TestEPDImage(t *testing.T) {
 		}
 		req := lastRequest(t, w)
 		item := path(req, "multimodal", "items").([]any)[0].(map[string]any)
-		arts, _ := item["embedding_artifacts"].([]any)
-		if len(arts) != 1 || path(arts[0], "reference") != item["digest"] || len(req["token_ids"].([]any)) != int(rr["prompt_tokens"].(float64)) {
-			t.Fatalf("%s request: artifacts %v", w, arts)
+		checkEmbedding(t, item)
+		if len(req["token_ids"].([]any)) != int(rr["prompt_tokens"].(float64)) {
+			t.Fatalf("%s request: token count", w)
 		}
 	}
 	if d := metric(t, gateway, "modelweave_embedding_artifact_lookups_total", `model="deepseek-v4.1"`, `result="miss"`) - miss0; d != 1 {
@@ -196,8 +197,7 @@ func TestEPDImage(t *testing.T) {
 	}
 }
 
-// mwip EPD for a video: one artifact per kept frame, verified by the
-// prefill worker with the encoder.
+// A whole video is encoded by one call; temporal slices share one location.
 func TestEPDVideo(t *testing.T) {
 	digest := sha256Hex([]byte("e2e-video-" + nonce()))
 	body := userBlocks("deepseek-v4.1", text("What happens in the clip?"), remoteVideo("https://video.example/"+digest+".mp4", digest, map[string]any{"fps": 1}))
@@ -212,13 +212,14 @@ func TestEPDVideo(t *testing.T) {
 	p := r.header.Get("X-ModelWeave-Prefill-Worker")
 	req := lastRequest(t, p)
 	item := path(req, "multimodal", "items").([]any)[0].(map[string]any)
-	arts, _ := item["embedding_artifacts"].([]any)
-	if item["modality"] != "MODALITY_VIDEO" || len(arts) != 10 {
-		t.Fatalf("%s: modality %v, %d artifacts", p, item["modality"], len(arts))
+	checkEmbedding(t, item)
+	placements := item["placements"].([]any)
+	if item["modality"] != "MODALITY_VIDEO" || len(placements) != 10 {
+		t.Fatalf("%s: modality %v, %d groups", p, item["modality"], len(placements))
 	}
-	for k, a := range arts {
-		if path(a, "reference") != fmt.Sprintf("%s_kf_%04d", digest, k) || path(a, "tokens") != path(rr, "multimodal", "items").([]any)[0].(map[string]any)["plan"].(map[string]any)["tokens"] {
-			t.Fatalf("artifact %d: %v", k, a)
+	for k, a := range placements {
+		if path(a, "reference") != fmt.Sprintf("%s_kf_%04d", item["plan_id"], k) {
+			t.Fatalf("placement %d: %v", k, a)
 		}
 	}
 	if metric(t, gateway, "modelweave_media_items_total", `model="deepseek-v4.1"`, `modality="video"`) == 0 ||

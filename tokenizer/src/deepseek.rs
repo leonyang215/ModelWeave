@@ -203,8 +203,9 @@ impl DeepseekRenderer {
                 ApiError::internal(protocol, e)
             })?;
         let layout = MediaLayout {
+            #[cfg(test)]
             image_placeholder: vec![IMAGE_SPECIAL_TOKEN_ID],
-            // V4.1 has no video placeholder for engines that expand media.
+            #[cfg(test)]
             video_placeholder: Vec::new(),
             frame_text: |t| format!("{t:.1} seconds"),
             frame_open: None,
@@ -279,7 +280,6 @@ impl DeepseekRenderer {
         }
         let multimodal = (!items.is_empty()).then_some(Multimodal {
             pad_shift: media::PAD_SHIFT,
-            placeholder_token_id: IMAGE_SPECIAL_TOKEN_ID,
             items,
         });
 

@@ -23,14 +23,14 @@ func f64(v float64) *float64 { return &v }
 
 // render is an intermediate state: "<bos> a b [image x4] c [image x3] <think>".
 func render() *mwip.RenderResult {
-	return &mwip.RenderResult{
+	r := &mwip.RenderResult{
 		RequestID: "r", PromptTokens: 11,
 		TokenIDs: []uint32{0, 10, 11, 1 << 30, 1 << 30, 1 << 30, 1 << 30, 12, 1<<30 + 5, 1<<30 + 5, 1<<30 + 5},
-		Multimodal: &mwip.Multimodal{PadShift: 1 << 30, PlaceholderTokenID: 129264, Items: []mwip.MediaItem{
-			{Index: 0, Modality: "image", Digest: "d0", Source: mwip.MediaSource{Kind: "url", URL: "https://a/0.png"},
-				Span: mwip.Span{Offset: 3, Length: 4}, Placements: []mwip.Placement{{Offset: 3, Length: 4, PadValue: 1 << 30, Reference: "d0", Modality: "image"}}},
-			{Index: 1, Modality: "image", Digest: "d1", Source: mwip.MediaSource{Kind: "url", URL: "https://a/1.png"},
-				Span: mwip.Span{Offset: 8, Length: 3}, Placements: []mwip.Placement{{Offset: 8, Length: 3, PadValue: 1<<30 + 5, Reference: "d1", Modality: "image"}}},
+		Multimodal: &mwip.Multimodal{PadShift: 1 << 30, Items: []mwip.MediaItem{
+			{Index: 0, Modality: "image", Digest: strings.Repeat("a", 64), Source: mwip.MediaSource{Kind: "url", URL: "https://a/0.png"},
+				Plan: mwip.MediaPlan{Processor: "qwen_vl.v1", Width: 64, Height: 64, Tokens: 4, NFrames: 1, PatchSize: 16, SpatialMergeSize: 2, TemporalPatchSize: 2}, Placements: []mwip.Placement{{Offset: 3, Length: 4, Modality: "image"}}},
+			{Index: 1, Modality: "image", Digest: strings.Repeat("b", 64), Source: mwip.MediaSource{Kind: "url", URL: "https://a/1.png"},
+				Plan: mwip.MediaPlan{Processor: "qwen_vl.v1", Width: 96, Height: 32, Tokens: 3, NFrames: 1, PatchSize: 16, SpatialMergeSize: 2, TemporalPatchSize: 2}, Placements: []mwip.Placement{{Offset: 8, Length: 3, Modality: "image"}}},
 		}},
 		Conversation: mwip.Conversation{ThinkingMode: true, ReasoningEffort: "high", ToolChoice: "auto", ResponseFormat: "text",
 			Tools: []json.RawMessage{json.RawMessage(`{"type":"function","function":{"name":"search"}}`)}},
@@ -38,6 +38,17 @@ func render() *mwip.RenderResult {
 			OutputConstraint: &mwip.OutputConstraint{Kind: "json", Schema: `{"type":"object"}`}},
 		ParsingOptions: mwip.ParsingOptions{ParseToolCalls: true, ThinkingInitialStage: "reasoning_start", StopSequences: []string{"END"}},
 	}
+	for i := range r.Multimodal.Items {
+		it := &r.Multimodal.Items[i]
+		it.PlanID = mwip.PlanID(it.Modality, it.Digest, it.Plan)
+		p := &it.Placements[0]
+		p.Reference = it.PlanID
+		p.PadValue = mwip.PadValue(p.Reference)
+		for k := p.Offset; k < p.Offset+p.Length; k++ {
+			r.TokenIDs[k] = p.PadValue
+		}
+	}
+	return r
 }
 
 func collect(t *testing.T, s *Stream) (string, *mwip.GenerateEvent, error) {
@@ -61,17 +72,19 @@ func collect(t *testing.T, s *Stream) (string, *mwip.GenerateEvent, error) {
 // fakeEngine is an mwip Engine answering Generate with a scripted stream.
 type fakeEngine struct {
 	mwipv1.UnimplementedEngineServer
-	script   []*mwipv1.GenerateResponse
-	status   error
-	block    bool // keep the stream open after the script until canceled
-	seen     chan *mwipv1.GenerateRequest
-	canceled chan struct{}
-	aborted  chan *mwipv1.AbortRequest
+	script      []*mwipv1.GenerateResponse
+	status      error
+	block       bool // keep the stream open after the script until canceled
+	seen        chan *mwipv1.GenerateRequest
+	canceled    chan struct{}
+	aborted     chan *mwipv1.AbortRequest
+	encoded     chan *mwipv1.EncodeRequest
+	encodeReply func(*mwipv1.EncodeRequest) *mwipv1.EncodeResponse
 }
 
 func newFake(script ...*mwipv1.GenerateResponse) *fakeEngine {
 	return &fakeEngine{script: script, seen: make(chan *mwipv1.GenerateRequest, 4), canceled: make(chan struct{}),
-		aborted: make(chan *mwipv1.AbortRequest, 4)}
+		aborted: make(chan *mwipv1.AbortRequest, 4), encoded: make(chan *mwipv1.EncodeRequest, 4)}
 }
 
 func (f *fakeEngine) Generate(req *mwipv1.GenerateRequest, s mwipv1.Engine_GenerateServer) error {
@@ -90,13 +103,48 @@ func (f *fakeEngine) Generate(req *mwipv1.GenerateRequest, s mwipv1.Engine_Gener
 }
 
 func (f *fakeEngine) Encode(_ context.Context, req *mwipv1.EncodeRequest) (*mwipv1.EncodeResponse, error) {
-	out := &mwipv1.EncodeResponse{EncodeMs: 4}
-	for _, it := range req.GetItems() {
-		for _, p := range it.GetPlacements() {
-			out.Artifacts = append(out.Artifacts, &mwipv1.EmbeddingArtifact{Reference: p.GetReference(), Uri: "mock://e0/" + p.GetReference(), Tokens: p.GetLength(), Encoder: "e0"})
-		}
+	f.encoded <- req
+	if f.encodeReply != nil {
+		return f.encodeReply(req), nil
 	}
+	it := mwip.InputFromProto(req.GetItem())
+	out := &mwipv1.EncodeResponse{EncodeMs: 4, Embedding: &mwipv1.EmbeddingLocation{Uri: "mock://e0/" + it.PlanID, Tokens: int32(it.Plan.EmbeddingTokens()), PlanId: it.PlanID, Encoder: "e0"}}
 	return out, nil
+}
+
+func TestRejectEncoderPlanAndLocationMismatch(t *testing.T) {
+	for _, kind := range []string{"missing", "uri", "plan", "rows"} {
+		t.Run(kind, func(t *testing.T) {
+			f := newFake()
+			f.encodeReply = func(req *mwipv1.EncodeRequest) *mwipv1.EncodeResponse {
+				it := mwip.InputFromProto(req.GetItem())
+				e := &mwipv1.EmbeddingLocation{Uri: "mock://e/item", Tokens: int32(it.Plan.EmbeddingTokens()), PlanId: it.PlanID}
+				switch kind {
+				case "missing":
+					e = nil
+				case "uri":
+					e.Uri = ""
+				case "plan":
+					e.PlanId = "different-plan"
+				case "rows":
+					e.Tokens++
+				}
+				return &mwipv1.EncodeResponse{Embedding: e}
+			}
+			spec := startEngine(t, f)
+			c := New()
+			defer c.Close()
+			in := render().Multimodal.Items[0].Input()
+			if _, err := c.Encode(context.Background(), spec, &EncodeStage{Item: &in}); err == nil {
+				t.Fatal("invalid encoder result accepted")
+			} else {
+				var e *Error
+				if !errors.As(err, &e) || e.Code != mwip.ErrInternal || !e.Retriable {
+					t.Fatalf("contract violation must retry another encoder: %v", err)
+				}
+			}
+		})
+	}
 }
 
 func (f *fakeEngine) Abort(_ context.Context, req *mwipv1.AbortRequest) (*mwipv1.AbortResponse, error) {
@@ -156,7 +204,8 @@ func TestMWIPGenerateCarriesTheIntermediateState(t *testing.T) {
 		req.GetConversation().GetTools()[0].GetFunction().GetName() != "search" || req.GetDisagg().GetMode() != mwipv1.DisaggMode_DISAGG_MODE_NORMAL {
 		t.Fatalf("options %v %v %v", po, io, req.GetConversation())
 	}
-	if len(mm.GetItems()) != 2 || mm.GetItems()[1].GetPlacements()[0].GetPadValue() != 1<<30+5 || mm.GetPlaceholderTokenId() != 129264 {
+	want := render().Multimodal.Items[1]
+	if len(mm.GetItems()) != 2 || mm.GetItems()[1].GetPlacements()[0].GetPadValue() != want.Placements[0].PadValue || mm.GetItems()[1].GetPlanId() != want.PlanID || int(mm.GetItems()[1].GetPlan().GetWidth()) != want.Plan.Width {
 		t.Fatalf("media %v", mm)
 	}
 }
@@ -284,9 +333,16 @@ func TestMWIPEncodeAbortAndState(t *testing.T) {
 	c := New()
 	defer c.Close()
 	r := render()
-	res, err := c.Encode(context.Background(), spec, &EncodeStage{RequestID: "r", AttemptID: "r-enc", Model: "m", Items: r.Multimodal.Items})
-	if err != nil || len(res.Artifacts) != 2 || res.Artifacts[1].Reference != "d1" || res.Artifacts[1].URI != "mock://e0/d1" || res.EncodeMS != 4 {
-		t.Fatalf("encode %+v %v", res, err)
+	for i, it := range r.Multimodal.Items {
+		in := it.Input()
+		res, err := c.Encode(context.Background(), spec, &EncodeStage{RequestID: "r", AttemptID: "r-enc", Model: "m", EngineModel: "engine-weights", Item: &in})
+		if err != nil || res.Embedding == nil || res.Embedding.PlanID != it.PlanID || res.Embedding.Tokens != it.Plan.EmbeddingTokens() || res.Embedding.URI != "mock://e0/"+it.PlanID || res.EncodeMS != 4 {
+			t.Fatalf("encode item %d: %+v %v", i, res, err)
+		}
+		seen := <-f.encoded
+		if seen.GetModel() != "engine-weights" || seen.GetItem().GetPlanId() != it.PlanID {
+			t.Fatalf("single-item encoder input: %+v", seen)
+		}
 	}
 	if err := c.Abort(context.Background(), spec, "r-1"); err != nil {
 		t.Fatal(err)

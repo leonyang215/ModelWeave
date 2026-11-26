@@ -149,11 +149,8 @@ type RenderArtifact struct {
 
 // Multimodal lists the images and videos of a prompt.
 type Multimodal struct {
-	PadShift uint32 `json:"pad_shift"` // every pad value is at least this
-	// PlaceholderTokenID is the model token one unexpanded image takes in
-	// the prompt format.
-	PlaceholderTokenID uint32      `json:"placeholder_token_id,omitempty"`
-	Items              []MediaItem `json:"items"`
+	PadShift uint32      `json:"pad_shift"` // every pad value is at least this
+	Items    []MediaItem `json:"items"`
 }
 
 // HasVideo reports whether any item is a video.
@@ -179,32 +176,26 @@ func (m *Multimodal) Clone() *Multimodal {
 	for i, it := range m.Items {
 		c.Items[i] = it
 		c.Items[i].Placements = append([]Placement(nil), it.Placements...)
-		c.Items[i].Placeholder = append([]uint32(nil), it.Placeholder...)
-		c.Items[i].Embeddings = append([]EmbeddingArtifact(nil), it.Embeddings...)
+		c.Items[i].Plan.FrameIndices = append([]uint64(nil), it.Plan.FrameIndices...)
+		c.Items[i].Plan.Timestamps = append([]float64(nil), it.Plan.Timestamps...)
+		if it.Embedding != nil {
+			e := *it.Embedding
+			c.Items[i].Embedding = &e
+		}
 	}
 	return &c
 }
 
 // MediaItem is one image or video.
 type MediaItem struct {
-	Index        int                  `json:"index"`
-	Modality     string               `json:"modality"` // image | video
-	Digest       string               `json:"digest"`   // sha256 hex of the media bytes
-	Source       MediaSource          `json:"source"`
-	Detail       string               `json:"detail,omitempty"`
-	Metadata     MediaMetadata        `json:"metadata"`
-	PixelControl *PixelControlOptions `json:"pixel_control_options,omitempty"`
-	FrameExtract *FrameExtractOptions `json:"frame_extract_options,omitempty"`
-	Plan         MediaPlan            `json:"plan"`
-	Span         Span                 `json:"span"` // whole range (a video's includes timestamp text)
-	Placements   []Placement          `json:"placements"`
-	// Placeholder is the model's own placeholder of the item in its prompt
-	// format, for engines that run the model's media processor on the raw
-	// item; empty when the model has none for the modality.
-	Placeholder []uint32 `json:"placeholder,omitempty"`
-	// Embeddings are set by the gateway after the encode stage: one per
-	// placement, in placement order.
-	Embeddings []EmbeddingArtifact `json:"embedding_artifacts,omitempty"`
+	Index      int                `json:"index"`
+	Modality   string             `json:"modality"` // image | video
+	Digest     string             `json:"digest"`   // sha256 hex of the media bytes
+	Source     MediaSource        `json:"source"`
+	Plan       MediaPlan          `json:"plan"`
+	PlanID     string             `json:"plan_id"`
+	Placements []Placement        `json:"placements"`
+	Embedding  *EmbeddingLocation `json:"embedding,omitempty"`
 }
 
 // MediaSource locates a media item.
@@ -214,46 +205,29 @@ type MediaSource struct {
 	MIME string `json:"mime,omitempty"`
 }
 
-// MediaMetadata holds the objective properties the caller measured.
-type MediaMetadata struct {
-	Width       int     `json:"width,omitempty"`
-	Height      int     `json:"height,omitempty"`
-	DurationMS  int64   `json:"duration_ms,omitempty"`
-	TotalFrames *int64  `json:"total_frames,omitempty"`
-	VideoFPS    float64 `json:"video_fps,omitempty"`
-}
-
-// PixelControlOptions caps one image or one video frame.
-type PixelControlOptions struct {
-	MaxLongSide    *int   `json:"max_long_side,omitempty"`
-	MaxTotalPixels *int64 `json:"max_total_pixels,omitempty"`
-}
-
-// FrameExtractOptions control the frame sampling of a video.
-type FrameExtractOptions struct {
-	FPS          *float64             `json:"fps,omitempty"`
-	NFrames      *int                 `json:"nframes,omitempty"`
-	PixelControl *PixelControlOptions `json:"pixel_control_options,omitempty"`
-}
-
-// MediaPlan is the resize and token plan of an item.
+// MediaPlan is an authoritative execution plan, not a processor hint.
 type MediaPlan struct {
-	Width      int       `json:"width"`
-	Height     int       `json:"height"`
-	Tokens     int       `json:"tokens"` // per image, or per kept frame
-	NFrames    int       `json:"nframes,omitempty"`
-	KeptFrames int       `json:"kept_frames,omitempty"`
-	Timestamps []float64 `json:"timestamps,omitempty"`
+	Processor         string    `json:"processor"`
+	Width             int       `json:"width"`
+	Height            int       `json:"height"`
+	Tokens            int       `json:"tokens"`  // per image, or per kept frame
+	NFrames           int       `json:"nframes"` // image: 1; video: exact padded index count
+	PatchSize         int       `json:"patch_size"`
+	SpatialMergeSize  int       `json:"spatial_merge_size"`
+	TemporalPatchSize int       `json:"temporal_patch_size"`
+	FrameIndices      []uint64  `json:"frame_indices,omitempty"`
+	Timestamps        []float64 `json:"timestamps,omitempty"`
 }
 
 // Placement is the token range of one image or one kept video frame.
 type Placement struct {
-	Offset    int      `json:"offset"`
-	Length    int      `json:"length"`
-	PadValue  uint32   `json:"pad_value"`
-	Reference string   `json:"reference"` // image digest, or "{video digest}_kf_{k:04}"
-	Modality  string   `json:"modality"`  // image | frame
-	Timestamp *float64 `json:"timestamp,omitempty"`
+	Offset          int      `json:"offset"`
+	Length          int      `json:"length"`
+	PadValue        uint32   `json:"pad_value"`
+	Reference       string   `json:"reference"` // image digest, or "{video digest}_kf_{k:04}"
+	Modality        string   `json:"modality"`  // image | frame
+	Timestamp       *float64 `json:"timestamp,omitempty"`
+	EmbeddingOffset int      `json:"embedding_offset"` // row in the item's packed tensor
 }
 
 // ---------------------------------------------------------------------------
@@ -468,28 +442,20 @@ type GenerateEvent struct {
 // Encode: modelweave.mwip.v1.Engine/Encode
 // ---------------------------------------------------------------------------
 
-// EmbeddingArtifact is the encoder output of one placement.
-type EmbeddingArtifact struct {
-	Reference string `json:"reference"` // placement reference
-	URI       string `json:"uri"`
-	Tokens    int    `json:"tokens"`
-	Encoder   string `json:"encoder,omitempty"`
-}
-
-// EncodeRequest asks an encoder to build the embeddings of media items.
+// EncodeRequest asks an encoder to execute exactly one item's frozen plan.
 type EncodeRequest struct {
 	RequestID string      `json:"request_id"`
 	AttemptID string      `json:"attempt_id"`
 	Model     string      `json:"model"`
-	Items     []MediaItem `json:"items"` // as rendered: plan and placements tell what to produce
+	Item      *MediaInput `json:"item"`
 	TimeoutMS int64       `json:"timeout_ms,omitempty"`
 }
 
-// EncodeResponse returns one artifact per placement of every item.
+// EncodeResponse returns one packed item embedding, not one result per frame.
 type EncodeResponse struct {
-	Artifacts []EmbeddingArtifact `json:"artifacts"`
-	EncodeMS  float64             `json:"encode_ms,omitempty"`
-	WorkerID  string              `json:"worker_id,omitempty"`
+	Embedding *EmbeddingLocation `json:"embedding"`
+	EncodeMS  float64            `json:"encode_ms,omitempty"`
+	WorkerID  string             `json:"worker_id,omitempty"`
 }
 
 // Error codes reported by engines (Error events, gRPC status details).

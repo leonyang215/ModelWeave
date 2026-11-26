@@ -20,8 +20,9 @@ type kvRole struct {
 // mediaRef is one media item of a request and its embedding artifacts.
 type mediaRef struct {
 	digest    string
-	tokens    int      // positions in the prompt
-	artifacts []string // embedding artifact URIs (one per placement)
+	tokens    int
+	input     mwip.MediaInput
+	embedding *mwip.EmbeddingLocation
 }
 
 // genReq is a Generate call as the mock runs it.
@@ -106,10 +107,7 @@ func fromMWIP(req *mwip.GenerateRequest, info modelInfo) *genReq {
 	}
 	if m := req.Multimodal; m != nil {
 		for _, it := range m.Items {
-			ref := mediaRef{digest: it.Digest, tokens: it.Span.Length}
-			for _, a := range it.Embeddings {
-				ref.artifacts = append(ref.artifacts, a.URI)
-			}
+			ref := mediaRef{digest: it.Digest, tokens: it.Plan.EmbeddingTokens(), input: it.Input(), embedding: it.Embedding}
 			g.media = append(g.media, ref)
 		}
 	}

@@ -226,47 +226,26 @@ qwen-vl-utils). A video renders as one group per temporal patch:
 values come from the model's `preprocessor_config.json` and
 `video_preprocessor_config.json` (and `[models.vision]` overrides).
 
-`multimodal` of the DeepSeek request above:
+The returned execution input does **not** echo these hints. Each item contains
+`source`, the authoritative `plan`, its content-bound `plan_id`, and
+`placements`. The plan includes versioned processor/patch settings, exact
+output dimensions and exact source-frame indices (including temporal padding).
+Original metadata, resize/frame controls, aggregate spans and collapsed
+placeholders are not instructions on the engine wire.
 
-```json
-{
-  "pad_shift": 1073741824,
-  "placeholder_token_id": 129264,       // <｜image｜>: one unexpanded image in the prompt format
-  "items": [
-    {"index": 0, "modality": "image",
-     "digest": "55c64d0f...04e8",
-     "source": {"kind": "url", "url": "https://img.example/photo.jpg"},
-     "metadata": {"width": 1920, "height": 1080}, "pixel_control_options": {"max_long_side": 1024},
-     "plan": {"width": 1036, "height": 588, "tokens": 366},          // 1920x1080 -> long side 1024 -> V4.1 resize
-     "span": {"offset": 41, "length": 366},
-     "placements": [{"offset": 41, "length": 366, "pad_value": 1728996728,
-                     "reference": "55c64d0f...04e8", "modality": "image"}],
-     "placeholder": [129264]},                                       // the model's own placeholder of the item
-    {"index": 1, "modality": "video",
-     "digest": "67905ad3...6e6d",
-     "source": {"kind": "url", "url": "https://video.example/clip.mp4"},
-     "metadata": {"width": 1280, "height": 720, "duration_ms": 10000, "total_frames": 300, "video_fps": 30.0},
-     "frame_extract_options": {"nframes": 4},
-     "plan": {"width": 728, "height": 420, "tokens": 192,            // per kept frame (672 px long side, 544² floor)
-              "nframes": 4, "kept_frames": 4, "timestamps": [0.0, 2.5, 5.0, 7.5]},
-     "span": {"offset": 408, "length": 784},                         // 4 × ("{t:.1} seconds" 4 tokens + 192)
-     "placements": [
-       {"offset": 412, "length": 192, "pad_value": 1831243460, "reference": "67905ad3...6e6d_kf_0000", "modality": "frame", "timestamp": 0.0},
-       {"offset": 608, "length": 192, "pad_value": 1997747760, "reference": "67905ad3...6e6d_kf_0001", "modality": "frame", "timestamp": 2.5},
-       ...]}                                                         // no placeholder: V4.1 has none for videos
-  ]
-}
+Each placement maps a slice of the item's packed visual tensor to the prompt:
+
+```text
+embedding[embedding_offset : embedding_offset + length]
+    → model_input[offset : offset + length]
 ```
 
-The same request to Qwen3-VL plans the image as 1024×576 = 576 positions
-(`"placeholder": [151655]`, `<|image_pad|>`) and the video as two temporal
-patches at 1.7 s and 8.3 s of 720 positions each (1152×640), its span from
-the first `<1.7 seconds>` to the last `<|vision_end|>` and
-`"placeholder": [151652, 151656, 151653]`
-(`<|vision_start|><|video_pad|><|vision_end|>`).
-
-`detail` (`"low"` / `"high"`), `pixel_control_options` and
-`frame_extract_options` are echoed when the request had them.
+References/pad values bind the complete plan, so equal-length videos with
+different sampled frames or equal-area image plans cannot falsely share KV
+prefixes just because the media digest matches. The full input, single-item
+Encode request/response and fingerprint algorithm are specified in
+[multimodal.md](multimodal.md); checked-in Rust→Go fixtures contain complete
+numeric examples.
 
 Invalid media fail the render with a 400 that names the block
 (`messages.0.content.1: metadata.digest (sha256 of the image bytes) is
@@ -338,13 +317,13 @@ clients are served by aggregating the stream in the gateway.
 | RPC | |
 |---|---|
 | `Generate(GenerateRequest) returns (stream GenerateResponse)` | one leg of a request |
-| `Encode(EncodeRequest) returns (EncodeResponse)` | embeddings of media items, one artifact per placement |
+| `Encode(EncodeRequest) returns (EncodeResponse)` | one frozen `MediaInput` → one packed `EmbeddingLocation` |
 | `Abort(AbortRequest) returns (AbortResponse)` | stop requests by id |
 | `GetState(GetStateRequest) returns (GetStateResponse)` | the instance's load, for polling |
 
 `GenerateRequest` is the tokenizer's result with the execution fields: the
 same `token_ids`, `multimodal` (with the encode stage's
-`embedding_artifacts`), `conversation`, `inference_options` and
+single-item `embedding` locations), `conversation`, `inference_options` and
 `parsing_options` as §1.1, plus `request_id`, `model`, `disagg` (`mode`,
 `role`, `handshake`, `room`, the `prefill` / `decode` peers, `kv_receiver`
 for push, `kv_handle` for pull), `timeout_ms`, `session_key` and `priority`.
@@ -389,13 +368,19 @@ Mooncake, ...) is the engines' own.
 
 ### 2.4 EPD (encode stage)
 
-The gateway sends each media item to an encode instance (`Engine.Encode`)
-before P / D are reserved. The answer is one artifact per placement (an
-image, or each kept video frame), **cached** by digest and plan. P / D get
-them as `multimodal.items[].embedding_artifacts`. Without encode instances
-(or with `encode.policy: never`) P / D encode media themselves from
-`source`. `artifact_unavailable` before any output makes the gateway rebuild
-the artifacts once.
+Before reserving P/D, the gateway sends **one item per `Engine.Encode` call**.
+The request has only modality, content digest, source, frozen plan and plan ID;
+it has no batch or original processor controls. The result is one packed
+embedding location with matching plan ID and total row count. A video's
+temporal groups occupy ordered slices of that one tensor.
+
+P/D receive it as `multimodal.items[].embedding` and use each placement's
+`embedding_offset`, `offset` and `length`. Incorrect encoder/cache results
+are rejected before dispatch. Without encode instances (or with
+`encode.policy: never`), local P/D encoding must execute exactly the same
+plan, never re-plan from defaults. `artifact_unavailable` before output
+triggers one rebuild. See [multimodal.md](multimodal.md) for validation and
+the intentionally incompatible replacement of the old batch contract.
 
 ### 2.5 Error codes
 

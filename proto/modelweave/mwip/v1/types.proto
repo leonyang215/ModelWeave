@@ -62,39 +62,30 @@ message MediaSource {
   string mime = 3;
 }
 
-// MediaMetadata holds the properties the caller measured.
-message MediaMetadata {
-  int32 width = 1;
-  int32 height = 2;
-  int64 duration_ms = 3;
-  optional int64 total_frames = 4;
-  double video_fps = 5;
-}
-
-// PixelControlOptions cap one image or one video frame.
-message PixelControlOptions {
-  optional int32 max_long_side = 1;
-  optional int64 max_total_pixels = 2;
-}
-
-// FrameExtractOptions control the frame sampling of a video.
-message FrameExtractOptions {
-  optional double fps = 1;
-  optional int32 nframes = 2;
-  PixelControlOptions pixel_control_options = 3;
-}
-
-// MediaPlan is the resize and token plan of a media item, computed by the
-// model's own processor rules.
+// MediaPlan is the authoritative execution plan, not a hint. The tokenizer
+// resolves user controls ONCE. Encoders and local P/D encoders must execute
+// these dimensions, frame indices and temporal grouping without re-planning.
 message MediaPlan {
   int32 width = 1;
   int32 height = 2;
   // Positions of an image, or of each kept frame of a video.
   int32 tokens = 3;
+  // Images: 1. Videos: exact number of frame_indices, INCLUDING explicitly
+  // repeated padding frames; divisible by temporal_patch_size. No implicit
+  // sampling/padding/resize changes are permitted in the encoder.
   int32 nframes = 4;
-  int32 kept_frames = 5;
-  // Seconds of the kept frames (or temporal patches).
+  reserved 5;
+  reserved "kept_frames";
+  // Timestamp of each output temporal group, also used in the text prompt.
   repeated double timestamps = 6;
+  // Exact source-frame indices in execution order, including repeated tail
+  // indices used for temporal padding. Images leave this empty.
+  repeated uint64 frame_indices = 7;
+  // Versioned preprocessing contract: deepseek_v4_1.v1 or qwen_vl.v1.
+  string processor = 8;
+  int32 temporal_patch_size = 9;
+  int32 patch_size = 10;
+  int32 spatial_merge_size = 11;
 }
 
 // Placement is the token range of one image or one kept video frame. Every
@@ -106,22 +97,37 @@ message Placement {
   // equal tokens, so prefix caches cover them, and no pad value collides
   // with a vocabulary token.
   uint32 pad_value = 3;
-  // The image digest, or "{video digest}_kf_{k:04}" for kept frame k.
+  // The content+plan ID, or "{plan_id}_kf_{k:04}" for temporal group k.
   string reference = 4;
   // MODALITY_IMAGE or MODALITY_FRAME.
   Modality modality = 5;
   // Seconds into the video, for frames.
   optional double timestamp = 6;
+  // Row offset in this item's packed embedding tensor. Scatter
+  // embedding[embedding_offset:embedding_offset+length] into
+  // token_ids[offset:offset+length]. Text/time/control tokens have no rows.
+  int32 embedding_offset = 7;
 }
 
-// EmbeddingArtifact is the encoder output of one placement.
-message EmbeddingArtifact {
-  // The placement's reference.
-  string reference = 1;
-  // Where the embedding is, in a scheme the engines agree on.
-  string uri = 2;
-  int32 tokens = 3;
-  // Instance id of the encoder that built it.
+// MediaInput is the request-independent input of ONE encoder invocation.
+// No original resize/sampling controls or prompt offsets are sent to Encode.
+message MediaInput {
+  Modality modality = 1;
+  string digest = 2;
+  MediaSource source = 3;
+  MediaPlan plan = 4;
+  // SHA-256 binding content digest + complete execution plan; see protocol.md.
+  string plan_id = 5;
+}
+
+// EmbeddingLocation locates ONE item's decoder-ready visual embedding.
+// Rows are packed in plan/frame-group order, with plan.tokens rows per group.
+// URI payload/transport is engine-defined; both P and D must be able to read
+// it and verify plan_id and row count before injecting the planned slices.
+message EmbeddingLocation {
+  string uri = 1;
+  int32 tokens = 2;
+  string plan_id = 3;
   string encoder = 4;
 }
 
@@ -134,31 +140,24 @@ message MediaItem {
   // sha256 hex of the media bytes.
   string digest = 3;
   MediaSource source = 4;
-  // "low", "high" or empty.
-  string detail = 5;
-  MediaMetadata metadata = 6;
-  PixelControlOptions pixel_control_options = 7;
-  FrameExtractOptions frame_extract_options = 8;
+  // User hints belong only to tokenizer input, never engine execution.
+  reserved 5, 6, 7, 8, 10, 12, 13;
+  reserved "detail", "metadata", "pixel_control_options", "frame_extract_options",
+           "span", "placeholder", "embedding_artifacts";
   MediaPlan plan = 9;
-  // The whole range of the item; a video's includes its timestamp text.
-  Span span = 10;
   // One per image, one per kept frame of a video.
   repeated Placement placements = 11;
-  // The model's placeholder of the item in its prompt format, for engines
-  // that expand media themselves; empty when the model has none for the
-  // modality.
-  repeated uint32 placeholder = 12;
-  // Set by the gateway after the encode stage: one per placement, in
-  // placement order. Without them the engine encodes the item itself.
-  repeated EmbeddingArtifact embedding_artifacts = 13;
+  // Set after Encode, otherwise P/D locally executes exactly the same plan.
+  EmbeddingLocation embedding = 14;
+  string plan_id = 15;
 }
 
 // Multimodal lists the images and videos of a prompt.
 message Multimodal {
   // Every pad value is at least pad_shift (2^30).
   uint32 pad_shift = 1;
-  // The model token one unexpanded image takes in the prompt format.
-  uint32 placeholder_token_id = 2;
+  reserved 2;
+  reserved "placeholder_token_id";
   repeated MediaItem items = 3;
 }
 

@@ -61,7 +61,7 @@ The gateway is the client of every instance:
 | RPC | What the engine does |
 |---|---|
 | `Generate(GenerateRequest) returns (stream GenerateResponse)` | runs one leg of a request and streams its parsed output |
-| `Encode(EncodeRequest) returns (EncodeResponse)` | builds the embeddings of media items, one artifact per placement (encode instances) |
+| `Encode(EncodeRequest) returns (EncodeResponse)` | executes exactly one frozen media input and returns one packed embedding location |
 | `Abort(AbortRequest) returns (AbortResponse)` | stops requests by id (best effort; the gateway also cancels the call) |
 | `GetState(GetStateRequest) returns (GetStateResponse)` | reports the instance's load, for gateways that poll |
 
@@ -72,7 +72,7 @@ The gateway is the client of every instance:
 | `request_id` | the attempt id; both legs of a split request share it, a retry gets a new one |
 | `model` | the engine-side model name (the gateway's `models[].engine_model`), may be empty |
 | `token_ids` | **the prompt to run as is**: the conversation rendered by the model's prompt format, every media position holding its pad value |
-| `multimodal` | the images and videos: plan, `span`, one `placement` per image or kept video frame (`offset`, `length`, `pad_value`, `reference`), the model's `placeholder`, and the `embedding_artifacts` of the encode stage when it ran |
+| `multimodal` | per-item authoritative `plan` + `plan_id`, prompt/tensor `placements`, and the optional single `embedding` location; no original processor hints or collapsed placeholders |
 | `conversation` | what parsers need: `thinking_mode`, `reasoning_effort`, `tools`, `tool_choice`, `response_format`, `chat_template_kwargs` |
 | `inference_options` | sampling: `max_tokens` (resolved), `temperature`, `top_p`, `top_k`, `min_p`, penalties, `seed`, `logprobs` / `top_logprobs`, the model's `stop_token_ids`, an `output_constraint` (JSON, regex, tool calls) |
 | `parsing_options` | how to parse the output: `reasoning_parser`, `tool_call_parser`, `parse_tool_calls`, `starts_in_tool_calls`, `parse_json_output`, `thinking_initial_stage`, `stop_sequences` |
@@ -80,11 +80,17 @@ The gateway is the client of every instance:
 | `timeout_ms`, `session_key`, `priority` | time left for the first output, the session, the tenant's priority |
 
 Pad values are `2^30 + (BE_u64(sha256(reference)[0..8]) & (2^30 − 1))`, so
-they never collide with vocabulary tokens, and equal media produce equal
+they never collide with vocabulary tokens, and equal content+plans produce equal
 tokens. A prefix cache keyed on the token list therefore covers multimodal
 prompts as is. An engine fills the positions of each placement with the
-embedding named by its artifact. Without artifacts, it encodes the item
-itself from `source`.
+embedding rows declared by `embedding_offset` in the item's packed location.
+Without a separate encoder it executes exactly the same frozen plan locally.
+The reference binds the content **and full plan**, not merely the media digest.
+
+See [the multimodal execution contract](multimodal.md) for the single-item
+Encode request/response, row mapping, validation, cache identity and upgrade
+requirements. This replaces the old batched Encode/per-placement-artifact
+contract; regenerate clients and upgrade multimodal components together.
 
 ### The Generate stream
 

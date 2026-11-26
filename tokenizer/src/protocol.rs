@@ -101,21 +101,36 @@ pub struct MediaSource {
     pub mime: String,
 }
 
-/// The result of planning one item: the size the model's preprocessing
-/// produces and the tokens per placement. Videos add the frame sampling.
+/// Authoritative preprocessing instructions. Encoders execute these values;
+/// they never run smart_resize/smart_nframes again from the user's hints.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct MediaPlan {
+    pub processor: &'static str,
     /// Width and height after the resize (per frame for a video).
     pub width: u32,
     pub height: u32,
     /// Tokens of the image, or of one kept frame.
     pub tokens: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub nframes: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub kept_frames: Option<usize>,
+    /// Image: 1. Video: exact index count INCLUDING explicit temporal padding.
+    pub nframes: u64,
+    pub patch_size: u32,
+    pub spatial_merge_size: u32,
+    pub temporal_patch_size: u32,
+    /// Exact source indices, including explicit repeated-tail temporal padding.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub frame_indices: Vec<u64>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub timestamps: Vec<f64>,
+}
+
+impl MediaPlan {
+    pub fn groups(&self) -> usize {
+        if self.frame_indices.is_empty() {
+            1
+        } else {
+            self.frame_indices.len() / self.temporal_patch_size.max(1) as usize
+        }
+    }
 }
 
 /// The token range of one image or one kept video frame.
@@ -132,6 +147,8 @@ pub struct Placement {
     pub modality: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<f64>,
+    /// Row offset in this item's packed encoder output, independent of prompt offset.
+    pub embedding_offset: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -141,21 +158,16 @@ pub struct MediaItem {
     pub modality: &'static str,
     pub digest: String,
     pub source: MediaSource,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>,
-    pub metadata: MediaMetadata,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub pixel_control_options: Option<PixelControlOptions>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub frame_extract_options: Option<FrameExtractOptions>,
     pub plan: MediaPlan,
-    /// The whole range of the item (a video's includes its timestamp text).
+    pub plan_id: String,
+    /// Rendering diagnostics for golden tests, NOT an engine instruction.
+    #[cfg(test)]
+    #[serde(skip_serializing)]
     pub span: Span,
     pub placements: Vec<Placement>,
-    /// The tokens that replace `span` for engines that expand media
-    /// themselves (the model's placeholder); absent when the model has none
-    /// for this modality, so only engines taking the expanded list can run it.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    /// Test-only collapsed prompt form; never serialized or sent to an engine.
+    #[cfg(test)]
+    #[serde(skip_serializing)]
     pub placeholder: Vec<u32>,
 }
 
@@ -163,15 +175,7 @@ pub struct MediaItem {
 pub struct Multimodal {
     /// Every pad_value is at least this, far outside the vocabulary.
     pub pad_shift: u32,
-    /// The model token one unexpanded image occupies in the prompt format,
-    /// for engines that expand media themselves.
-    #[serde(skip_serializing_if = "is_zero")]
-    pub placeholder_token_id: u32,
     pub items: Vec<MediaItem>,
-}
-
-fn is_zero(v: &u32) -> bool {
-    *v == 0
 }
 
 /// The conversation without its messages (they are in `token_ids` now):

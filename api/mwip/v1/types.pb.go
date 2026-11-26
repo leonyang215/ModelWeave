@@ -389,216 +389,36 @@ func (x *MediaSource) GetMime() string {
 	return ""
 }
 
-// MediaMetadata holds the properties the caller measured.
-type MediaMetadata struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Width         int32                  `protobuf:"varint,1,opt,name=width,proto3" json:"width,omitempty"`
-	Height        int32                  `protobuf:"varint,2,opt,name=height,proto3" json:"height,omitempty"`
-	DurationMs    int64                  `protobuf:"varint,3,opt,name=duration_ms,json=durationMs,proto3" json:"duration_ms,omitempty"`
-	TotalFrames   *int64                 `protobuf:"varint,4,opt,name=total_frames,json=totalFrames,proto3,oneof" json:"total_frames,omitempty"`
-	VideoFps      float64                `protobuf:"fixed64,5,opt,name=video_fps,json=videoFps,proto3" json:"video_fps,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *MediaMetadata) Reset() {
-	*x = MediaMetadata{}
-	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[2]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *MediaMetadata) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*MediaMetadata) ProtoMessage() {}
-
-func (x *MediaMetadata) ProtoReflect() protoreflect.Message {
-	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[2]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use MediaMetadata.ProtoReflect.Descriptor instead.
-func (*MediaMetadata) Descriptor() ([]byte, []int) {
-	return file_modelweave_mwip_v1_types_proto_rawDescGZIP(), []int{2}
-}
-
-func (x *MediaMetadata) GetWidth() int32 {
-	if x != nil {
-		return x.Width
-	}
-	return 0
-}
-
-func (x *MediaMetadata) GetHeight() int32 {
-	if x != nil {
-		return x.Height
-	}
-	return 0
-}
-
-func (x *MediaMetadata) GetDurationMs() int64 {
-	if x != nil {
-		return x.DurationMs
-	}
-	return 0
-}
-
-func (x *MediaMetadata) GetTotalFrames() int64 {
-	if x != nil && x.TotalFrames != nil {
-		return *x.TotalFrames
-	}
-	return 0
-}
-
-func (x *MediaMetadata) GetVideoFps() float64 {
-	if x != nil {
-		return x.VideoFps
-	}
-	return 0
-}
-
-// PixelControlOptions cap one image or one video frame.
-type PixelControlOptions struct {
-	state          protoimpl.MessageState `protogen:"open.v1"`
-	MaxLongSide    *int32                 `protobuf:"varint,1,opt,name=max_long_side,json=maxLongSide,proto3,oneof" json:"max_long_side,omitempty"`
-	MaxTotalPixels *int64                 `protobuf:"varint,2,opt,name=max_total_pixels,json=maxTotalPixels,proto3,oneof" json:"max_total_pixels,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
-}
-
-func (x *PixelControlOptions) Reset() {
-	*x = PixelControlOptions{}
-	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[3]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *PixelControlOptions) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*PixelControlOptions) ProtoMessage() {}
-
-func (x *PixelControlOptions) ProtoReflect() protoreflect.Message {
-	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[3]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use PixelControlOptions.ProtoReflect.Descriptor instead.
-func (*PixelControlOptions) Descriptor() ([]byte, []int) {
-	return file_modelweave_mwip_v1_types_proto_rawDescGZIP(), []int{3}
-}
-
-func (x *PixelControlOptions) GetMaxLongSide() int32 {
-	if x != nil && x.MaxLongSide != nil {
-		return *x.MaxLongSide
-	}
-	return 0
-}
-
-func (x *PixelControlOptions) GetMaxTotalPixels() int64 {
-	if x != nil && x.MaxTotalPixels != nil {
-		return *x.MaxTotalPixels
-	}
-	return 0
-}
-
-// FrameExtractOptions control the frame sampling of a video.
-type FrameExtractOptions struct {
-	state               protoimpl.MessageState `protogen:"open.v1"`
-	Fps                 *float64               `protobuf:"fixed64,1,opt,name=fps,proto3,oneof" json:"fps,omitempty"`
-	Nframes             *int32                 `protobuf:"varint,2,opt,name=nframes,proto3,oneof" json:"nframes,omitempty"`
-	PixelControlOptions *PixelControlOptions   `protobuf:"bytes,3,opt,name=pixel_control_options,json=pixelControlOptions,proto3" json:"pixel_control_options,omitempty"`
-	unknownFields       protoimpl.UnknownFields
-	sizeCache           protoimpl.SizeCache
-}
-
-func (x *FrameExtractOptions) Reset() {
-	*x = FrameExtractOptions{}
-	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[4]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *FrameExtractOptions) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*FrameExtractOptions) ProtoMessage() {}
-
-func (x *FrameExtractOptions) ProtoReflect() protoreflect.Message {
-	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[4]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use FrameExtractOptions.ProtoReflect.Descriptor instead.
-func (*FrameExtractOptions) Descriptor() ([]byte, []int) {
-	return file_modelweave_mwip_v1_types_proto_rawDescGZIP(), []int{4}
-}
-
-func (x *FrameExtractOptions) GetFps() float64 {
-	if x != nil && x.Fps != nil {
-		return *x.Fps
-	}
-	return 0
-}
-
-func (x *FrameExtractOptions) GetNframes() int32 {
-	if x != nil && x.Nframes != nil {
-		return *x.Nframes
-	}
-	return 0
-}
-
-func (x *FrameExtractOptions) GetPixelControlOptions() *PixelControlOptions {
-	if x != nil {
-		return x.PixelControlOptions
-	}
-	return nil
-}
-
-// MediaPlan is the resize and token plan of a media item, computed by the
-// model's own processor rules.
+// MediaPlan is the authoritative execution plan, not a hint. The tokenizer
+// resolves user controls ONCE. Encoders and local P/D encoders must execute
+// these dimensions, frame indices and temporal grouping without re-planning.
 type MediaPlan struct {
 	state  protoimpl.MessageState `protogen:"open.v1"`
 	Width  int32                  `protobuf:"varint,1,opt,name=width,proto3" json:"width,omitempty"`
 	Height int32                  `protobuf:"varint,2,opt,name=height,proto3" json:"height,omitempty"`
 	// Positions of an image, or of each kept frame of a video.
-	Tokens     int32 `protobuf:"varint,3,opt,name=tokens,proto3" json:"tokens,omitempty"`
-	Nframes    int32 `protobuf:"varint,4,opt,name=nframes,proto3" json:"nframes,omitempty"`
-	KeptFrames int32 `protobuf:"varint,5,opt,name=kept_frames,json=keptFrames,proto3" json:"kept_frames,omitempty"`
-	// Seconds of the kept frames (or temporal patches).
-	Timestamps    []float64 `protobuf:"fixed64,6,rep,packed,name=timestamps,proto3" json:"timestamps,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Tokens int32 `protobuf:"varint,3,opt,name=tokens,proto3" json:"tokens,omitempty"`
+	// Images: 1. Videos: exact number of frame_indices, INCLUDING explicitly
+	// repeated padding frames; divisible by temporal_patch_size. No implicit
+	// sampling/padding/resize changes are permitted in the encoder.
+	Nframes int32 `protobuf:"varint,4,opt,name=nframes,proto3" json:"nframes,omitempty"`
+	// Timestamp of each output temporal group, also used in the text prompt.
+	Timestamps []float64 `protobuf:"fixed64,6,rep,packed,name=timestamps,proto3" json:"timestamps,omitempty"`
+	// Exact source-frame indices in execution order, including repeated tail
+	// indices used for temporal padding. Images leave this empty.
+	FrameIndices []uint64 `protobuf:"varint,7,rep,packed,name=frame_indices,json=frameIndices,proto3" json:"frame_indices,omitempty"`
+	// Versioned preprocessing contract: deepseek_v4_1.v1 or qwen_vl.v1.
+	Processor         string `protobuf:"bytes,8,opt,name=processor,proto3" json:"processor,omitempty"`
+	TemporalPatchSize int32  `protobuf:"varint,9,opt,name=temporal_patch_size,json=temporalPatchSize,proto3" json:"temporal_patch_size,omitempty"`
+	PatchSize         int32  `protobuf:"varint,10,opt,name=patch_size,json=patchSize,proto3" json:"patch_size,omitempty"`
+	SpatialMergeSize  int32  `protobuf:"varint,11,opt,name=spatial_merge_size,json=spatialMergeSize,proto3" json:"spatial_merge_size,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *MediaPlan) Reset() {
 	*x = MediaPlan{}
-	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[5]
+	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -610,7 +430,7 @@ func (x *MediaPlan) String() string {
 func (*MediaPlan) ProtoMessage() {}
 
 func (x *MediaPlan) ProtoReflect() protoreflect.Message {
-	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[5]
+	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -623,7 +443,7 @@ func (x *MediaPlan) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MediaPlan.ProtoReflect.Descriptor instead.
 func (*MediaPlan) Descriptor() ([]byte, []int) {
-	return file_modelweave_mwip_v1_types_proto_rawDescGZIP(), []int{5}
+	return file_modelweave_mwip_v1_types_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *MediaPlan) GetWidth() int32 {
@@ -654,18 +474,46 @@ func (x *MediaPlan) GetNframes() int32 {
 	return 0
 }
 
-func (x *MediaPlan) GetKeptFrames() int32 {
-	if x != nil {
-		return x.KeptFrames
-	}
-	return 0
-}
-
 func (x *MediaPlan) GetTimestamps() []float64 {
 	if x != nil {
 		return x.Timestamps
 	}
 	return nil
+}
+
+func (x *MediaPlan) GetFrameIndices() []uint64 {
+	if x != nil {
+		return x.FrameIndices
+	}
+	return nil
+}
+
+func (x *MediaPlan) GetProcessor() string {
+	if x != nil {
+		return x.Processor
+	}
+	return ""
+}
+
+func (x *MediaPlan) GetTemporalPatchSize() int32 {
+	if x != nil {
+		return x.TemporalPatchSize
+	}
+	return 0
+}
+
+func (x *MediaPlan) GetPatchSize() int32 {
+	if x != nil {
+		return x.PatchSize
+	}
+	return 0
+}
+
+func (x *MediaPlan) GetSpatialMergeSize() int32 {
+	if x != nil {
+		return x.SpatialMergeSize
+	}
+	return 0
 }
 
 // Placement is the token range of one image or one kept video frame. Every
@@ -678,19 +526,23 @@ type Placement struct {
 	// equal tokens, so prefix caches cover them, and no pad value collides
 	// with a vocabulary token.
 	PadValue uint32 `protobuf:"varint,3,opt,name=pad_value,json=padValue,proto3" json:"pad_value,omitempty"`
-	// The image digest, or "{video digest}_kf_{k:04}" for kept frame k.
+	// The content+plan ID, or "{plan_id}_kf_{k:04}" for temporal group k.
 	Reference string `protobuf:"bytes,4,opt,name=reference,proto3" json:"reference,omitempty"`
 	// MODALITY_IMAGE or MODALITY_FRAME.
 	Modality Modality `protobuf:"varint,5,opt,name=modality,proto3,enum=modelweave.mwip.v1.Modality" json:"modality,omitempty"`
 	// Seconds into the video, for frames.
-	Timestamp     *float64 `protobuf:"fixed64,6,opt,name=timestamp,proto3,oneof" json:"timestamp,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Timestamp *float64 `protobuf:"fixed64,6,opt,name=timestamp,proto3,oneof" json:"timestamp,omitempty"`
+	// Row offset in this item's packed embedding tensor. Scatter
+	// embedding[embedding_offset:embedding_offset+length] into
+	// token_ids[offset:offset+length]. Text/time/control tokens have no rows.
+	EmbeddingOffset int32 `protobuf:"varint,7,opt,name=embedding_offset,json=embeddingOffset,proto3" json:"embedding_offset,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *Placement) Reset() {
 	*x = Placement{}
-	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[6]
+	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -702,7 +554,7 @@ func (x *Placement) String() string {
 func (*Placement) ProtoMessage() {}
 
 func (x *Placement) ProtoReflect() protoreflect.Message {
-	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[6]
+	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -715,7 +567,7 @@ func (x *Placement) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Placement.ProtoReflect.Descriptor instead.
 func (*Placement) Descriptor() ([]byte, []int) {
-	return file_modelweave_mwip_v1_types_proto_rawDescGZIP(), []int{6}
+	return file_modelweave_mwip_v1_types_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *Placement) GetOffset() int32 {
@@ -760,35 +612,42 @@ func (x *Placement) GetTimestamp() float64 {
 	return 0
 }
 
-// EmbeddingArtifact is the encoder output of one placement.
-type EmbeddingArtifact struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// The placement's reference.
-	Reference string `protobuf:"bytes,1,opt,name=reference,proto3" json:"reference,omitempty"`
-	// Where the embedding is, in a scheme the engines agree on.
-	Uri    string `protobuf:"bytes,2,opt,name=uri,proto3" json:"uri,omitempty"`
-	Tokens int32  `protobuf:"varint,3,opt,name=tokens,proto3" json:"tokens,omitempty"`
-	// Instance id of the encoder that built it.
-	Encoder       string `protobuf:"bytes,4,opt,name=encoder,proto3" json:"encoder,omitempty"`
+func (x *Placement) GetEmbeddingOffset() int32 {
+	if x != nil {
+		return x.EmbeddingOffset
+	}
+	return 0
+}
+
+// MediaInput is the request-independent input of ONE encoder invocation.
+// No original resize/sampling controls or prompt offsets are sent to Encode.
+type MediaInput struct {
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	Modality Modality               `protobuf:"varint,1,opt,name=modality,proto3,enum=modelweave.mwip.v1.Modality" json:"modality,omitempty"`
+	Digest   string                 `protobuf:"bytes,2,opt,name=digest,proto3" json:"digest,omitempty"`
+	Source   *MediaSource           `protobuf:"bytes,3,opt,name=source,proto3" json:"source,omitempty"`
+	Plan     *MediaPlan             `protobuf:"bytes,4,opt,name=plan,proto3" json:"plan,omitempty"`
+	// SHA-256 binding content digest + complete execution plan; see protocol.md.
+	PlanId        string `protobuf:"bytes,5,opt,name=plan_id,json=planId,proto3" json:"plan_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *EmbeddingArtifact) Reset() {
-	*x = EmbeddingArtifact{}
-	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[7]
+func (x *MediaInput) Reset() {
+	*x = MediaInput{}
+	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *EmbeddingArtifact) String() string {
+func (x *MediaInput) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*EmbeddingArtifact) ProtoMessage() {}
+func (*MediaInput) ProtoMessage() {}
 
-func (x *EmbeddingArtifact) ProtoReflect() protoreflect.Message {
-	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[7]
+func (x *MediaInput) ProtoReflect() protoreflect.Message {
+	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -799,33 +658,112 @@ func (x *EmbeddingArtifact) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use EmbeddingArtifact.ProtoReflect.Descriptor instead.
-func (*EmbeddingArtifact) Descriptor() ([]byte, []int) {
-	return file_modelweave_mwip_v1_types_proto_rawDescGZIP(), []int{7}
+// Deprecated: Use MediaInput.ProtoReflect.Descriptor instead.
+func (*MediaInput) Descriptor() ([]byte, []int) {
+	return file_modelweave_mwip_v1_types_proto_rawDescGZIP(), []int{4}
 }
 
-func (x *EmbeddingArtifact) GetReference() string {
+func (x *MediaInput) GetModality() Modality {
 	if x != nil {
-		return x.Reference
+		return x.Modality
+	}
+	return Modality_MODALITY_UNSPECIFIED
+}
+
+func (x *MediaInput) GetDigest() string {
+	if x != nil {
+		return x.Digest
 	}
 	return ""
 }
 
-func (x *EmbeddingArtifact) GetUri() string {
+func (x *MediaInput) GetSource() *MediaSource {
+	if x != nil {
+		return x.Source
+	}
+	return nil
+}
+
+func (x *MediaInput) GetPlan() *MediaPlan {
+	if x != nil {
+		return x.Plan
+	}
+	return nil
+}
+
+func (x *MediaInput) GetPlanId() string {
+	if x != nil {
+		return x.PlanId
+	}
+	return ""
+}
+
+// EmbeddingLocation locates ONE item's decoder-ready visual embedding.
+// Rows are packed in plan/frame-group order, with plan.tokens rows per group.
+// URI payload/transport is engine-defined; both P and D must be able to read
+// it and verify plan_id and row count before injecting the planned slices.
+type EmbeddingLocation struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Uri           string                 `protobuf:"bytes,1,opt,name=uri,proto3" json:"uri,omitempty"`
+	Tokens        int32                  `protobuf:"varint,2,opt,name=tokens,proto3" json:"tokens,omitempty"`
+	PlanId        string                 `protobuf:"bytes,3,opt,name=plan_id,json=planId,proto3" json:"plan_id,omitempty"`
+	Encoder       string                 `protobuf:"bytes,4,opt,name=encoder,proto3" json:"encoder,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *EmbeddingLocation) Reset() {
+	*x = EmbeddingLocation{}
+	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *EmbeddingLocation) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*EmbeddingLocation) ProtoMessage() {}
+
+func (x *EmbeddingLocation) ProtoReflect() protoreflect.Message {
+	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use EmbeddingLocation.ProtoReflect.Descriptor instead.
+func (*EmbeddingLocation) Descriptor() ([]byte, []int) {
+	return file_modelweave_mwip_v1_types_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *EmbeddingLocation) GetUri() string {
 	if x != nil {
 		return x.Uri
 	}
 	return ""
 }
 
-func (x *EmbeddingArtifact) GetTokens() int32 {
+func (x *EmbeddingLocation) GetTokens() int32 {
 	if x != nil {
 		return x.Tokens
 	}
 	return 0
 }
 
-func (x *EmbeddingArtifact) GetEncoder() string {
+func (x *EmbeddingLocation) GetPlanId() string {
+	if x != nil {
+		return x.PlanId
+	}
+	return ""
+}
+
+func (x *EmbeddingLocation) GetEncoder() string {
 	if x != nil {
 		return x.Encoder
 	}
@@ -842,30 +780,19 @@ type MediaItem struct {
 	// sha256 hex of the media bytes.
 	Digest string       `protobuf:"bytes,3,opt,name=digest,proto3" json:"digest,omitempty"`
 	Source *MediaSource `protobuf:"bytes,4,opt,name=source,proto3" json:"source,omitempty"`
-	// "low", "high" or empty.
-	Detail              string               `protobuf:"bytes,5,opt,name=detail,proto3" json:"detail,omitempty"`
-	Metadata            *MediaMetadata       `protobuf:"bytes,6,opt,name=metadata,proto3" json:"metadata,omitempty"`
-	PixelControlOptions *PixelControlOptions `protobuf:"bytes,7,opt,name=pixel_control_options,json=pixelControlOptions,proto3" json:"pixel_control_options,omitempty"`
-	FrameExtractOptions *FrameExtractOptions `protobuf:"bytes,8,opt,name=frame_extract_options,json=frameExtractOptions,proto3" json:"frame_extract_options,omitempty"`
-	Plan                *MediaPlan           `protobuf:"bytes,9,opt,name=plan,proto3" json:"plan,omitempty"`
-	// The whole range of the item; a video's includes its timestamp text.
-	Span *Span `protobuf:"bytes,10,opt,name=span,proto3" json:"span,omitempty"`
+	Plan   *MediaPlan   `protobuf:"bytes,9,opt,name=plan,proto3" json:"plan,omitempty"`
 	// One per image, one per kept frame of a video.
 	Placements []*Placement `protobuf:"bytes,11,rep,name=placements,proto3" json:"placements,omitempty"`
-	// The model's placeholder of the item in its prompt format, for engines
-	// that expand media themselves; empty when the model has none for the
-	// modality.
-	Placeholder []uint32 `protobuf:"varint,12,rep,packed,name=placeholder,proto3" json:"placeholder,omitempty"`
-	// Set by the gateway after the encode stage: one per placement, in
-	// placement order. Without them the engine encodes the item itself.
-	EmbeddingArtifacts []*EmbeddingArtifact `protobuf:"bytes,13,rep,name=embedding_artifacts,json=embeddingArtifacts,proto3" json:"embedding_artifacts,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// Set after Encode, otherwise P/D locally executes exactly the same plan.
+	Embedding     *EmbeddingLocation `protobuf:"bytes,14,opt,name=embedding,proto3" json:"embedding,omitempty"`
+	PlanId        string             `protobuf:"bytes,15,opt,name=plan_id,json=planId,proto3" json:"plan_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *MediaItem) Reset() {
 	*x = MediaItem{}
-	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[8]
+	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -877,7 +804,7 @@ func (x *MediaItem) String() string {
 func (*MediaItem) ProtoMessage() {}
 
 func (x *MediaItem) ProtoReflect() protoreflect.Message {
-	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[8]
+	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -890,7 +817,7 @@ func (x *MediaItem) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MediaItem.ProtoReflect.Descriptor instead.
 func (*MediaItem) Descriptor() ([]byte, []int) {
-	return file_modelweave_mwip_v1_types_proto_rawDescGZIP(), []int{8}
+	return file_modelweave_mwip_v1_types_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *MediaItem) GetIndex() int32 {
@@ -921,44 +848,9 @@ func (x *MediaItem) GetSource() *MediaSource {
 	return nil
 }
 
-func (x *MediaItem) GetDetail() string {
-	if x != nil {
-		return x.Detail
-	}
-	return ""
-}
-
-func (x *MediaItem) GetMetadata() *MediaMetadata {
-	if x != nil {
-		return x.Metadata
-	}
-	return nil
-}
-
-func (x *MediaItem) GetPixelControlOptions() *PixelControlOptions {
-	if x != nil {
-		return x.PixelControlOptions
-	}
-	return nil
-}
-
-func (x *MediaItem) GetFrameExtractOptions() *FrameExtractOptions {
-	if x != nil {
-		return x.FrameExtractOptions
-	}
-	return nil
-}
-
 func (x *MediaItem) GetPlan() *MediaPlan {
 	if x != nil {
 		return x.Plan
-	}
-	return nil
-}
-
-func (x *MediaItem) GetSpan() *Span {
-	if x != nil {
-		return x.Span
 	}
 	return nil
 }
@@ -970,35 +862,33 @@ func (x *MediaItem) GetPlacements() []*Placement {
 	return nil
 }
 
-func (x *MediaItem) GetPlaceholder() []uint32 {
+func (x *MediaItem) GetEmbedding() *EmbeddingLocation {
 	if x != nil {
-		return x.Placeholder
+		return x.Embedding
 	}
 	return nil
 }
 
-func (x *MediaItem) GetEmbeddingArtifacts() []*EmbeddingArtifact {
+func (x *MediaItem) GetPlanId() string {
 	if x != nil {
-		return x.EmbeddingArtifacts
+		return x.PlanId
 	}
-	return nil
+	return ""
 }
 
 // Multimodal lists the images and videos of a prompt.
 type Multimodal struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Every pad value is at least pad_shift (2^30).
-	PadShift uint32 `protobuf:"varint,1,opt,name=pad_shift,json=padShift,proto3" json:"pad_shift,omitempty"`
-	// The model token one unexpanded image takes in the prompt format.
-	PlaceholderTokenId uint32       `protobuf:"varint,2,opt,name=placeholder_token_id,json=placeholderTokenId,proto3" json:"placeholder_token_id,omitempty"`
-	Items              []*MediaItem `protobuf:"bytes,3,rep,name=items,proto3" json:"items,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	PadShift      uint32       `protobuf:"varint,1,opt,name=pad_shift,json=padShift,proto3" json:"pad_shift,omitempty"`
+	Items         []*MediaItem `protobuf:"bytes,3,rep,name=items,proto3" json:"items,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Multimodal) Reset() {
 	*x = Multimodal{}
-	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[9]
+	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1010,7 +900,7 @@ func (x *Multimodal) String() string {
 func (*Multimodal) ProtoMessage() {}
 
 func (x *Multimodal) ProtoReflect() protoreflect.Message {
-	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[9]
+	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1023,19 +913,12 @@ func (x *Multimodal) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Multimodal.ProtoReflect.Descriptor instead.
 func (*Multimodal) Descriptor() ([]byte, []int) {
-	return file_modelweave_mwip_v1_types_proto_rawDescGZIP(), []int{9}
+	return file_modelweave_mwip_v1_types_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *Multimodal) GetPadShift() uint32 {
 	if x != nil {
 		return x.PadShift
-	}
-	return 0
-}
-
-func (x *Multimodal) GetPlaceholderTokenId() uint32 {
-	if x != nil {
-		return x.PlaceholderTokenId
 	}
 	return 0
 }
@@ -1061,7 +944,7 @@ type FunctionDefinition struct {
 
 func (x *FunctionDefinition) Reset() {
 	*x = FunctionDefinition{}
-	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[10]
+	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1073,7 +956,7 @@ func (x *FunctionDefinition) String() string {
 func (*FunctionDefinition) ProtoMessage() {}
 
 func (x *FunctionDefinition) ProtoReflect() protoreflect.Message {
-	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[10]
+	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1086,7 +969,7 @@ func (x *FunctionDefinition) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FunctionDefinition.ProtoReflect.Descriptor instead.
 func (*FunctionDefinition) Descriptor() ([]byte, []int) {
-	return file_modelweave_mwip_v1_types_proto_rawDescGZIP(), []int{10}
+	return file_modelweave_mwip_v1_types_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *FunctionDefinition) GetName() string {
@@ -1129,7 +1012,7 @@ type Tool struct {
 
 func (x *Tool) Reset() {
 	*x = Tool{}
-	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[11]
+	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1141,7 +1024,7 @@ func (x *Tool) String() string {
 func (*Tool) ProtoMessage() {}
 
 func (x *Tool) ProtoReflect() protoreflect.Message {
-	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[11]
+	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1154,7 +1037,7 @@ func (x *Tool) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Tool.ProtoReflect.Descriptor instead.
 func (*Tool) Descriptor() ([]byte, []int) {
-	return file_modelweave_mwip_v1_types_proto_rawDescGZIP(), []int{11}
+	return file_modelweave_mwip_v1_types_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *Tool) GetType() string {
@@ -1193,7 +1076,7 @@ type Conversation struct {
 
 func (x *Conversation) Reset() {
 	*x = Conversation{}
-	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[12]
+	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1205,7 +1088,7 @@ func (x *Conversation) String() string {
 func (*Conversation) ProtoMessage() {}
 
 func (x *Conversation) ProtoReflect() protoreflect.Message {
-	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[12]
+	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1218,7 +1101,7 @@ func (x *Conversation) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Conversation.ProtoReflect.Descriptor instead.
 func (*Conversation) Descriptor() ([]byte, []int) {
-	return file_modelweave_mwip_v1_types_proto_rawDescGZIP(), []int{12}
+	return file_modelweave_mwip_v1_types_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *Conversation) GetThinkingMode() bool {
@@ -1275,7 +1158,7 @@ type OutputConstraint struct {
 
 func (x *OutputConstraint) Reset() {
 	*x = OutputConstraint{}
-	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[13]
+	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1287,7 +1170,7 @@ func (x *OutputConstraint) String() string {
 func (*OutputConstraint) ProtoMessage() {}
 
 func (x *OutputConstraint) ProtoReflect() protoreflect.Message {
-	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[13]
+	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1300,7 +1183,7 @@ func (x *OutputConstraint) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OutputConstraint.ProtoReflect.Descriptor instead.
 func (*OutputConstraint) Descriptor() ([]byte, []int) {
-	return file_modelweave_mwip_v1_types_proto_rawDescGZIP(), []int{13}
+	return file_modelweave_mwip_v1_types_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *OutputConstraint) GetKind() ConstraintKind {
@@ -1341,7 +1224,7 @@ type InferenceOptions struct {
 
 func (x *InferenceOptions) Reset() {
 	*x = InferenceOptions{}
-	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[14]
+	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1353,7 +1236,7 @@ func (x *InferenceOptions) String() string {
 func (*InferenceOptions) ProtoMessage() {}
 
 func (x *InferenceOptions) ProtoReflect() protoreflect.Message {
-	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[14]
+	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1366,7 +1249,7 @@ func (x *InferenceOptions) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InferenceOptions.ProtoReflect.Descriptor instead.
 func (*InferenceOptions) Descriptor() ([]byte, []int) {
-	return file_modelweave_mwip_v1_types_proto_rawDescGZIP(), []int{14}
+	return file_modelweave_mwip_v1_types_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *InferenceOptions) GetMaxTokens() int32 {
@@ -1482,7 +1365,7 @@ type ParsingOptions struct {
 
 func (x *ParsingOptions) Reset() {
 	*x = ParsingOptions{}
-	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[15]
+	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1494,7 +1377,7 @@ func (x *ParsingOptions) String() string {
 func (*ParsingOptions) ProtoMessage() {}
 
 func (x *ParsingOptions) ProtoReflect() protoreflect.Message {
-	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[15]
+	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1507,7 +1390,7 @@ func (x *ParsingOptions) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ParsingOptions.ProtoReflect.Descriptor instead.
 func (*ParsingOptions) Descriptor() ([]byte, []int) {
-	return file_modelweave_mwip_v1_types_proto_rawDescGZIP(), []int{15}
+	return file_modelweave_mwip_v1_types_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *ParsingOptions) GetReasoningParser() string {
@@ -1580,7 +1463,7 @@ type EngineState struct {
 
 func (x *EngineState) Reset() {
 	*x = EngineState{}
-	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[16]
+	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1592,7 +1475,7 @@ func (x *EngineState) String() string {
 func (*EngineState) ProtoMessage() {}
 
 func (x *EngineState) ProtoReflect() protoreflect.Message {
-	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[16]
+	mi := &file_modelweave_mwip_v1_types_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1605,7 +1488,7 @@ func (x *EngineState) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EngineState.ProtoReflect.Descriptor instead.
 func (*EngineState) Descriptor() ([]byte, []int) {
-	return file_modelweave_mwip_v1_types_proto_rawDescGZIP(), []int{16}
+	return file_modelweave_mwip_v1_types_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *EngineState) GetRunningRequests() int32 {
@@ -1696,73 +1579,60 @@ const file_modelweave_mwip_v1_types_proto_rawDesc = "" +
 	"\vMediaSource\x12\x12\n" +
 	"\x04kind\x18\x01 \x01(\tR\x04kind\x12\x10\n" +
 	"\x03url\x18\x02 \x01(\tR\x03url\x12\x12\n" +
-	"\x04mime\x18\x03 \x01(\tR\x04mime\"\xb4\x01\n" +
-	"\rMediaMetadata\x12\x14\n" +
-	"\x05width\x18\x01 \x01(\x05R\x05width\x12\x16\n" +
-	"\x06height\x18\x02 \x01(\x05R\x06height\x12\x1f\n" +
-	"\vduration_ms\x18\x03 \x01(\x03R\n" +
-	"durationMs\x12&\n" +
-	"\ftotal_frames\x18\x04 \x01(\x03H\x00R\vtotalFrames\x88\x01\x01\x12\x1b\n" +
-	"\tvideo_fps\x18\x05 \x01(\x01R\bvideoFpsB\x0f\n" +
-	"\r_total_frames\"\x94\x01\n" +
-	"\x13PixelControlOptions\x12'\n" +
-	"\rmax_long_side\x18\x01 \x01(\x05H\x00R\vmaxLongSide\x88\x01\x01\x12-\n" +
-	"\x10max_total_pixels\x18\x02 \x01(\x03H\x01R\x0emaxTotalPixels\x88\x01\x01B\x10\n" +
-	"\x0e_max_long_sideB\x13\n" +
-	"\x11_max_total_pixels\"\xbc\x01\n" +
-	"\x13FrameExtractOptions\x12\x15\n" +
-	"\x03fps\x18\x01 \x01(\x01H\x00R\x03fps\x88\x01\x01\x12\x1d\n" +
-	"\anframes\x18\x02 \x01(\x05H\x01R\anframes\x88\x01\x01\x12[\n" +
-	"\x15pixel_control_options\x18\x03 \x01(\v2'.modelweave.mwip.v1.PixelControlOptionsR\x13pixelControlOptionsB\x06\n" +
-	"\x04_fpsB\n" +
-	"\n" +
-	"\b_nframes\"\xac\x01\n" +
+	"\x04mime\x18\x03 \x01(\tR\x04mime\"\xde\x02\n" +
 	"\tMediaPlan\x12\x14\n" +
 	"\x05width\x18\x01 \x01(\x05R\x05width\x12\x16\n" +
 	"\x06height\x18\x02 \x01(\x05R\x06height\x12\x16\n" +
 	"\x06tokens\x18\x03 \x01(\x05R\x06tokens\x12\x18\n" +
-	"\anframes\x18\x04 \x01(\x05R\anframes\x12\x1f\n" +
-	"\vkept_frames\x18\x05 \x01(\x05R\n" +
-	"keptFrames\x12\x1e\n" +
+	"\anframes\x18\x04 \x01(\x05R\anframes\x12\x1e\n" +
 	"\n" +
 	"timestamps\x18\x06 \x03(\x01R\n" +
-	"timestamps\"\xe1\x01\n" +
+	"timestamps\x12#\n" +
+	"\rframe_indices\x18\a \x03(\x04R\fframeIndices\x12\x1c\n" +
+	"\tprocessor\x18\b \x01(\tR\tprocessor\x12.\n" +
+	"\x13temporal_patch_size\x18\t \x01(\x05R\x11temporalPatchSize\x12\x1d\n" +
+	"\n" +
+	"patch_size\x18\n" +
+	" \x01(\x05R\tpatchSize\x12,\n" +
+	"\x12spatial_merge_size\x18\v \x01(\x05R\x10spatialMergeSizeJ\x04\b\x05\x10\x06R\vkept_frames\"\x8c\x02\n" +
 	"\tPlacement\x12\x16\n" +
 	"\x06offset\x18\x01 \x01(\x05R\x06offset\x12\x16\n" +
 	"\x06length\x18\x02 \x01(\x05R\x06length\x12\x1b\n" +
 	"\tpad_value\x18\x03 \x01(\rR\bpadValue\x12\x1c\n" +
 	"\treference\x18\x04 \x01(\tR\treference\x128\n" +
 	"\bmodality\x18\x05 \x01(\x0e2\x1c.modelweave.mwip.v1.ModalityR\bmodality\x12!\n" +
-	"\ttimestamp\x18\x06 \x01(\x01H\x00R\ttimestamp\x88\x01\x01B\f\n" +
+	"\ttimestamp\x18\x06 \x01(\x01H\x00R\ttimestamp\x88\x01\x01\x12)\n" +
+	"\x10embedding_offset\x18\a \x01(\x05R\x0fembeddingOffsetB\f\n" +
 	"\n" +
-	"_timestamp\"u\n" +
-	"\x11EmbeddingArtifact\x12\x1c\n" +
-	"\treference\x18\x01 \x01(\tR\treference\x12\x10\n" +
-	"\x03uri\x18\x02 \x01(\tR\x03uri\x12\x16\n" +
-	"\x06tokens\x18\x03 \x01(\x05R\x06tokens\x12\x18\n" +
-	"\aencoder\x18\x04 \x01(\tR\aencoder\"\xd7\x05\n" +
+	"_timestamp\"\xe3\x01\n" +
+	"\n" +
+	"MediaInput\x128\n" +
+	"\bmodality\x18\x01 \x01(\x0e2\x1c.modelweave.mwip.v1.ModalityR\bmodality\x12\x16\n" +
+	"\x06digest\x18\x02 \x01(\tR\x06digest\x127\n" +
+	"\x06source\x18\x03 \x01(\v2\x1f.modelweave.mwip.v1.MediaSourceR\x06source\x121\n" +
+	"\x04plan\x18\x04 \x01(\v2\x1d.modelweave.mwip.v1.MediaPlanR\x04plan\x12\x17\n" +
+	"\aplan_id\x18\x05 \x01(\tR\x06planId\"p\n" +
+	"\x11EmbeddingLocation\x12\x10\n" +
+	"\x03uri\x18\x01 \x01(\tR\x03uri\x12\x16\n" +
+	"\x06tokens\x18\x02 \x01(\x05R\x06tokens\x12\x17\n" +
+	"\aplan_id\x18\x03 \x01(\tR\x06planId\x12\x18\n" +
+	"\aencoder\x18\x04 \x01(\tR\aencoder\"\x8e\x04\n" +
 	"\tMediaItem\x12\x14\n" +
 	"\x05index\x18\x01 \x01(\x05R\x05index\x128\n" +
 	"\bmodality\x18\x02 \x01(\x0e2\x1c.modelweave.mwip.v1.ModalityR\bmodality\x12\x16\n" +
 	"\x06digest\x18\x03 \x01(\tR\x06digest\x127\n" +
-	"\x06source\x18\x04 \x01(\v2\x1f.modelweave.mwip.v1.MediaSourceR\x06source\x12\x16\n" +
-	"\x06detail\x18\x05 \x01(\tR\x06detail\x12=\n" +
-	"\bmetadata\x18\x06 \x01(\v2!.modelweave.mwip.v1.MediaMetadataR\bmetadata\x12[\n" +
-	"\x15pixel_control_options\x18\a \x01(\v2'.modelweave.mwip.v1.PixelControlOptionsR\x13pixelControlOptions\x12[\n" +
-	"\x15frame_extract_options\x18\b \x01(\v2'.modelweave.mwip.v1.FrameExtractOptionsR\x13frameExtractOptions\x121\n" +
-	"\x04plan\x18\t \x01(\v2\x1d.modelweave.mwip.v1.MediaPlanR\x04plan\x12,\n" +
-	"\x04span\x18\n" +
-	" \x01(\v2\x18.modelweave.mwip.v1.SpanR\x04span\x12=\n" +
+	"\x06source\x18\x04 \x01(\v2\x1f.modelweave.mwip.v1.MediaSourceR\x06source\x121\n" +
+	"\x04plan\x18\t \x01(\v2\x1d.modelweave.mwip.v1.MediaPlanR\x04plan\x12=\n" +
 	"\n" +
 	"placements\x18\v \x03(\v2\x1d.modelweave.mwip.v1.PlacementR\n" +
-	"placements\x12 \n" +
-	"\vplaceholder\x18\f \x03(\rR\vplaceholder\x12V\n" +
-	"\x13embedding_artifacts\x18\r \x03(\v2%.modelweave.mwip.v1.EmbeddingArtifactR\x12embeddingArtifacts\"\x90\x01\n" +
+	"placements\x12C\n" +
+	"\tembedding\x18\x0e \x01(\v2%.modelweave.mwip.v1.EmbeddingLocationR\tembedding\x12\x17\n" +
+	"\aplan_id\x18\x0f \x01(\tR\x06planIdJ\x04\b\x05\x10\x06J\x04\b\x06\x10\aJ\x04\b\a\x10\bJ\x04\b\b\x10\tJ\x04\b\n" +
+	"\x10\vJ\x04\b\f\x10\rJ\x04\b\r\x10\x0eR\x06detailR\bmetadataR\x15pixel_control_optionsR\x15frame_extract_optionsR\x04spanR\vplaceholderR\x13embedding_artifacts\"z\n" +
 	"\n" +
 	"Multimodal\x12\x1b\n" +
-	"\tpad_shift\x18\x01 \x01(\rR\bpadShift\x120\n" +
-	"\x14placeholder_token_id\x18\x02 \x01(\rR\x12placeholderTokenId\x123\n" +
-	"\x05items\x18\x03 \x03(\v2\x1d.modelweave.mwip.v1.MediaItemR\x05items\"\xab\x01\n" +
+	"\tpad_shift\x18\x01 \x01(\rR\bpadShift\x123\n" +
+	"\x05items\x18\x03 \x03(\v2\x1d.modelweave.mwip.v1.MediaItemR\x05itemsJ\x04\b\x02\x10\x03R\x14placeholder_token_id\"\xab\x01\n" +
 	"\x12FunctionDefinition\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x127\n" +
@@ -1867,56 +1737,52 @@ func file_modelweave_mwip_v1_types_proto_rawDescGZIP() []byte {
 }
 
 var file_modelweave_mwip_v1_types_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
-var file_modelweave_mwip_v1_types_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
+var file_modelweave_mwip_v1_types_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
 var file_modelweave_mwip_v1_types_proto_goTypes = []any{
-	(Role)(0),                   // 0: modelweave.mwip.v1.Role
-	(Modality)(0),               // 1: modelweave.mwip.v1.Modality
-	(ConstraintKind)(0),         // 2: modelweave.mwip.v1.ConstraintKind
-	(ThinkingStage)(0),          // 3: modelweave.mwip.v1.ThinkingStage
-	(*Span)(nil),                // 4: modelweave.mwip.v1.Span
-	(*MediaSource)(nil),         // 5: modelweave.mwip.v1.MediaSource
-	(*MediaMetadata)(nil),       // 6: modelweave.mwip.v1.MediaMetadata
-	(*PixelControlOptions)(nil), // 7: modelweave.mwip.v1.PixelControlOptions
-	(*FrameExtractOptions)(nil), // 8: modelweave.mwip.v1.FrameExtractOptions
-	(*MediaPlan)(nil),           // 9: modelweave.mwip.v1.MediaPlan
-	(*Placement)(nil),           // 10: modelweave.mwip.v1.Placement
-	(*EmbeddingArtifact)(nil),   // 11: modelweave.mwip.v1.EmbeddingArtifact
-	(*MediaItem)(nil),           // 12: modelweave.mwip.v1.MediaItem
-	(*Multimodal)(nil),          // 13: modelweave.mwip.v1.Multimodal
-	(*FunctionDefinition)(nil),  // 14: modelweave.mwip.v1.FunctionDefinition
-	(*Tool)(nil),                // 15: modelweave.mwip.v1.Tool
-	(*Conversation)(nil),        // 16: modelweave.mwip.v1.Conversation
-	(*OutputConstraint)(nil),    // 17: modelweave.mwip.v1.OutputConstraint
-	(*InferenceOptions)(nil),    // 18: modelweave.mwip.v1.InferenceOptions
-	(*ParsingOptions)(nil),      // 19: modelweave.mwip.v1.ParsingOptions
-	(*EngineState)(nil),         // 20: modelweave.mwip.v1.EngineState
-	(*structpb.Struct)(nil),     // 21: google.protobuf.Struct
+	(Role)(0),                  // 0: modelweave.mwip.v1.Role
+	(Modality)(0),              // 1: modelweave.mwip.v1.Modality
+	(ConstraintKind)(0),        // 2: modelweave.mwip.v1.ConstraintKind
+	(ThinkingStage)(0),         // 3: modelweave.mwip.v1.ThinkingStage
+	(*Span)(nil),               // 4: modelweave.mwip.v1.Span
+	(*MediaSource)(nil),        // 5: modelweave.mwip.v1.MediaSource
+	(*MediaPlan)(nil),          // 6: modelweave.mwip.v1.MediaPlan
+	(*Placement)(nil),          // 7: modelweave.mwip.v1.Placement
+	(*MediaInput)(nil),         // 8: modelweave.mwip.v1.MediaInput
+	(*EmbeddingLocation)(nil),  // 9: modelweave.mwip.v1.EmbeddingLocation
+	(*MediaItem)(nil),          // 10: modelweave.mwip.v1.MediaItem
+	(*Multimodal)(nil),         // 11: modelweave.mwip.v1.Multimodal
+	(*FunctionDefinition)(nil), // 12: modelweave.mwip.v1.FunctionDefinition
+	(*Tool)(nil),               // 13: modelweave.mwip.v1.Tool
+	(*Conversation)(nil),       // 14: modelweave.mwip.v1.Conversation
+	(*OutputConstraint)(nil),   // 15: modelweave.mwip.v1.OutputConstraint
+	(*InferenceOptions)(nil),   // 16: modelweave.mwip.v1.InferenceOptions
+	(*ParsingOptions)(nil),     // 17: modelweave.mwip.v1.ParsingOptions
+	(*EngineState)(nil),        // 18: modelweave.mwip.v1.EngineState
+	(*structpb.Struct)(nil),    // 19: google.protobuf.Struct
 }
 var file_modelweave_mwip_v1_types_proto_depIdxs = []int32{
-	7,  // 0: modelweave.mwip.v1.FrameExtractOptions.pixel_control_options:type_name -> modelweave.mwip.v1.PixelControlOptions
-	1,  // 1: modelweave.mwip.v1.Placement.modality:type_name -> modelweave.mwip.v1.Modality
-	1,  // 2: modelweave.mwip.v1.MediaItem.modality:type_name -> modelweave.mwip.v1.Modality
-	5,  // 3: modelweave.mwip.v1.MediaItem.source:type_name -> modelweave.mwip.v1.MediaSource
-	6,  // 4: modelweave.mwip.v1.MediaItem.metadata:type_name -> modelweave.mwip.v1.MediaMetadata
-	7,  // 5: modelweave.mwip.v1.MediaItem.pixel_control_options:type_name -> modelweave.mwip.v1.PixelControlOptions
-	8,  // 6: modelweave.mwip.v1.MediaItem.frame_extract_options:type_name -> modelweave.mwip.v1.FrameExtractOptions
-	9,  // 7: modelweave.mwip.v1.MediaItem.plan:type_name -> modelweave.mwip.v1.MediaPlan
-	4,  // 8: modelweave.mwip.v1.MediaItem.span:type_name -> modelweave.mwip.v1.Span
-	10, // 9: modelweave.mwip.v1.MediaItem.placements:type_name -> modelweave.mwip.v1.Placement
-	11, // 10: modelweave.mwip.v1.MediaItem.embedding_artifacts:type_name -> modelweave.mwip.v1.EmbeddingArtifact
-	12, // 11: modelweave.mwip.v1.Multimodal.items:type_name -> modelweave.mwip.v1.MediaItem
-	21, // 12: modelweave.mwip.v1.FunctionDefinition.parameters:type_name -> google.protobuf.Struct
-	14, // 13: modelweave.mwip.v1.Tool.function:type_name -> modelweave.mwip.v1.FunctionDefinition
-	15, // 14: modelweave.mwip.v1.Conversation.tools:type_name -> modelweave.mwip.v1.Tool
-	21, // 15: modelweave.mwip.v1.Conversation.chat_template_kwargs:type_name -> google.protobuf.Struct
-	2,  // 16: modelweave.mwip.v1.OutputConstraint.kind:type_name -> modelweave.mwip.v1.ConstraintKind
-	17, // 17: modelweave.mwip.v1.InferenceOptions.output_constraint:type_name -> modelweave.mwip.v1.OutputConstraint
-	3,  // 18: modelweave.mwip.v1.ParsingOptions.thinking_initial_stage:type_name -> modelweave.mwip.v1.ThinkingStage
-	19, // [19:19] is the sub-list for method output_type
-	19, // [19:19] is the sub-list for method input_type
-	19, // [19:19] is the sub-list for extension type_name
-	19, // [19:19] is the sub-list for extension extendee
-	0,  // [0:19] is the sub-list for field type_name
+	1,  // 0: modelweave.mwip.v1.Placement.modality:type_name -> modelweave.mwip.v1.Modality
+	1,  // 1: modelweave.mwip.v1.MediaInput.modality:type_name -> modelweave.mwip.v1.Modality
+	5,  // 2: modelweave.mwip.v1.MediaInput.source:type_name -> modelweave.mwip.v1.MediaSource
+	6,  // 3: modelweave.mwip.v1.MediaInput.plan:type_name -> modelweave.mwip.v1.MediaPlan
+	1,  // 4: modelweave.mwip.v1.MediaItem.modality:type_name -> modelweave.mwip.v1.Modality
+	5,  // 5: modelweave.mwip.v1.MediaItem.source:type_name -> modelweave.mwip.v1.MediaSource
+	6,  // 6: modelweave.mwip.v1.MediaItem.plan:type_name -> modelweave.mwip.v1.MediaPlan
+	7,  // 7: modelweave.mwip.v1.MediaItem.placements:type_name -> modelweave.mwip.v1.Placement
+	9,  // 8: modelweave.mwip.v1.MediaItem.embedding:type_name -> modelweave.mwip.v1.EmbeddingLocation
+	10, // 9: modelweave.mwip.v1.Multimodal.items:type_name -> modelweave.mwip.v1.MediaItem
+	19, // 10: modelweave.mwip.v1.FunctionDefinition.parameters:type_name -> google.protobuf.Struct
+	12, // 11: modelweave.mwip.v1.Tool.function:type_name -> modelweave.mwip.v1.FunctionDefinition
+	13, // 12: modelweave.mwip.v1.Conversation.tools:type_name -> modelweave.mwip.v1.Tool
+	19, // 13: modelweave.mwip.v1.Conversation.chat_template_kwargs:type_name -> google.protobuf.Struct
+	2,  // 14: modelweave.mwip.v1.OutputConstraint.kind:type_name -> modelweave.mwip.v1.ConstraintKind
+	15, // 15: modelweave.mwip.v1.InferenceOptions.output_constraint:type_name -> modelweave.mwip.v1.OutputConstraint
+	3,  // 16: modelweave.mwip.v1.ParsingOptions.thinking_initial_stage:type_name -> modelweave.mwip.v1.ThinkingStage
+	17, // [17:17] is the sub-list for method output_type
+	17, // [17:17] is the sub-list for method input_type
+	17, // [17:17] is the sub-list for extension type_name
+	17, // [17:17] is the sub-list for extension extendee
+	0,  // [0:17] is the sub-list for field type_name
 }
 
 func init() { file_modelweave_mwip_v1_types_proto_init() }
@@ -1924,19 +1790,16 @@ func file_modelweave_mwip_v1_types_proto_init() {
 	if File_modelweave_mwip_v1_types_proto != nil {
 		return
 	}
-	file_modelweave_mwip_v1_types_proto_msgTypes[2].OneofWrappers = []any{}
 	file_modelweave_mwip_v1_types_proto_msgTypes[3].OneofWrappers = []any{}
-	file_modelweave_mwip_v1_types_proto_msgTypes[4].OneofWrappers = []any{}
-	file_modelweave_mwip_v1_types_proto_msgTypes[6].OneofWrappers = []any{}
-	file_modelweave_mwip_v1_types_proto_msgTypes[10].OneofWrappers = []any{}
-	file_modelweave_mwip_v1_types_proto_msgTypes[14].OneofWrappers = []any{}
+	file_modelweave_mwip_v1_types_proto_msgTypes[8].OneofWrappers = []any{}
+	file_modelweave_mwip_v1_types_proto_msgTypes[12].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_modelweave_mwip_v1_types_proto_rawDesc), len(file_modelweave_mwip_v1_types_proto_rawDesc)),
 			NumEnums:      4,
-			NumMessages:   17,
+			NumMessages:   15,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

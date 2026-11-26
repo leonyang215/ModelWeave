@@ -51,11 +51,13 @@ func (s *engineService) Generate(req *mwipv1.GenerateRequest, stream mwipv1.Engi
 }
 
 func (s *engineService) Encode(ctx context.Context, req *mwipv1.EncodeRequest) (*mwipv1.EncodeResponse, error) {
+	raw, _ := recorded.Marshal(req)
+	s.e.count(func() { s.e.stats.LastEncode = raw })
 	resp, err := s.e.encode(ctx, mwip.EncodeRequestFromProto(req))
 	if err != nil {
 		return nil, codeStatus(err)
 	}
-	return &mwipv1.EncodeResponse{Artifacts: mwip.ArtifactsToProto(resp.Artifacts), EncodeMs: resp.EncodeMS}, nil
+	return &mwipv1.EncodeResponse{Embedding: mwip.EmbeddingToProto(resp.Embedding), EncodeMs: resp.EncodeMS}, nil
 }
 
 func (s *engineService) Abort(_ context.Context, req *mwipv1.AbortRequest) (*mwipv1.AbortResponse, error) {

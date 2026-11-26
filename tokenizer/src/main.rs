@@ -11,6 +11,8 @@
 mod chat;
 mod deepseek;
 mod error;
+#[cfg(test)]
+mod fixture_tests;
 mod hf;
 mod media;
 mod metrics;

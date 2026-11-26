@@ -45,23 +45,28 @@ type EncodeStats struct {
 
 // Encode runs the encode stage before P/D reservations are taken, so that no
 // prefill/decode capacity is held while encoders work: every item whose
-// artifacts are not cached is built on an encode instance (one artifact per
-// placement: an image, or each kept frame of a video), and the artifacts are
-// attached to the job's media for P/D.
+// embedding is not cached is built on an encode instance with exactly its
+// frozen plan. One packed location per item is then forwarded to both P/D.
 func (o *Orchestrator) Encode(ctx context.Context, job *Job) (*EncodeStats, error) {
 	start := time.Now()
 	m := job.Model
 	items := job.Media.Items
 	st := &EncodeStats{Items: len(items)}
+	if err := mwip.ValidateMedia(job.TokenIDs(), job.Media); err != nil {
+		return st, fmt.Errorf("invalid media execution contract: %w", err)
+	}
 	var todo []int
 	seen := map[string]bool{}
 	for i := range items {
 		key := ArtifactKey(&items[i])
-		if arts, ok := m.Artifacts.Get(key); ok {
-			items[i].Embeddings = arts
-			st.Hits++
-			o.met.ArtifactLookup.WithLabelValues(m.Name, "hit").Inc()
-			continue
+		if embedding, ok := m.Artifacts.Get(key); ok {
+			if err := items[i].Input().ValidateEmbedding(&embedding); err == nil {
+				items[i].Embedding = &embedding
+				st.Hits++
+				o.met.ArtifactLookup.WithLabelValues(m.Name, "hit").Inc()
+				continue
+			}
+			m.Artifacts.Invalidate(key)
 		}
 		o.met.ArtifactLookup.WithLabelValues(m.Name, "miss").Inc()
 		if !seen[key] {
@@ -73,10 +78,11 @@ func (o *Orchestrator) Encode(ctx context.Context, job *Job) (*EncodeStats, erro
 		mu       sync.Mutex
 		firstErr error
 		wg       sync.WaitGroup
-		built    = map[string][]mwip.EmbeddingArtifact{}
+		built    = map[string]mwip.EmbeddingLocation{}
 	)
 	sem := make(chan struct{}, 4)
-	ctx, cancel := context.WithDeadline(ctx, job.FirstTokenDeadline)
+	parent := ctx
+	ctx, cancel := context.WithDeadline(parent, job.FirstTokenDeadline)
 	defer cancel()
 	for _, idx := range todo {
 		wg.Add(1)
@@ -99,8 +105,8 @@ func (o *Orchestrator) Encode(ctx context.Context, job *Job) (*EncodeStats, erro
 				return
 			}
 			key := ArtifactKey(&items[idx])
-			m.Artifacts.Put(key, res.Artifacts)
-			built[key] = res.Artifacts
+			m.Artifacts.Put(key, *res.Embedding)
+			built[key] = *res.Embedding
 			st.Built++
 			st.Workers = append(st.Workers, worker)
 		}(idx)
@@ -109,12 +115,19 @@ func (o *Orchestrator) Encode(ctx context.Context, job *Job) (*EncodeStats, erro
 	if firstErr != nil {
 		return st, firstErr
 	}
-	if ctx.Err() != nil && time.Now().After(job.FirstTokenDeadline) {
+	if ctx.Err() != nil {
+		if parent.Err() != nil {
+			return st, parent.Err()
+		}
 		return st, ErrFirstTokenTimeout
 	}
 	for i := range items {
-		if items[i].Embeddings == nil {
-			items[i].Embeddings = built[ArtifactKey(&items[i])]
+		if items[i].Embedding == nil {
+			e, ok := built[ArtifactKey(&items[i])]
+			if !ok {
+				return st, fmt.Errorf("encoder produced no item embedding")
+			}
+			items[i].Embedding = &e
 		}
 	}
 	st.Duration = time.Since(start)
@@ -142,14 +155,12 @@ func (o *Orchestrator) encodeItem(ctx context.Context, job *Job, it *mwip.MediaI
 			return nil, "", err
 		}
 		o.met.EngineRequests.WithLabelValues(m.Name, string(registry.RoleEncode)).Inc()
+		input := it.Input()
 		res, err := o.eng.Encode(ctx, d.Spec, &engine.EncodeStage{
 			RequestID: job.ID, AttemptID: fmt.Sprintf("%s-enc%d-%d", job.ID, it.Index, attempt),
-			Model: m.Name, EngineModel: m.Cfg.EngineModel, Items: []mwip.MediaItem{*it},
+			Model: m.Name, EngineModel: m.Cfg.EngineModel, Item: &input,
 			TimeoutMS: time.Until(job.FirstTokenDeadline).Milliseconds(),
 		})
-		if err == nil {
-			res.Artifacts, err = orderArtifacts(d.Spec.ID, it, res.Artifacts)
-		}
 		d.Reservation.Release(err == nil)
 		if err == nil {
 			d.Worker.ReportSuccess()
@@ -173,24 +184,6 @@ func (o *Orchestrator) encodeItem(ctx context.Context, job *Job, it *mwip.MediaI
 	return nil, "", lastErr
 }
 
-// orderArtifacts returns one artifact per placement, in placement order.
-func orderArtifacts(worker string, it *mwip.MediaItem, arts []mwip.EmbeddingArtifact) ([]mwip.EmbeddingArtifact, error) {
-	by := make(map[string]mwip.EmbeddingArtifact, len(arts))
-	for _, a := range arts {
-		by[a.Reference] = a
-	}
-	out := make([]mwip.EmbeddingArtifact, 0, len(it.Placements))
-	for _, p := range it.Placements {
-		a, ok := by[p.Reference]
-		if !ok {
-			return nil, &engine.Error{Role: "encode", WorkerID: worker, Code: mwip.ErrInternal, Retriable: true,
-				Message: fmt.Sprintf("encoder returned no artifact for %s", p.Reference)}
-		}
-		out = append(out, a)
-	}
-	return out, nil
-}
-
 // InvalidateArtifacts drops the job's artifacts from the cache and the job
 // (an engine reported them unavailable) so a rebuild happens.
 func (o *Orchestrator) InvalidateArtifacts(job *Job) {
@@ -200,7 +193,7 @@ func (o *Orchestrator) InvalidateArtifacts(job *Job) {
 	var keys []string
 	for i := range job.Media.Items {
 		keys = append(keys, ArtifactKey(&job.Media.Items[i]))
-		job.Media.Items[i].Embeddings = nil
+		job.Media.Items[i].Embedding = nil
 	}
 	job.Model.Artifacts.Invalidate(keys...)
 	o.met.ArtifactLookup.WithLabelValues(job.Model.Name, "invalidated").Add(float64(len(keys)))

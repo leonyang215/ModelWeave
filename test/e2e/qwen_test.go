@@ -318,7 +318,7 @@ func qwenMedia(model string) map[string]any {
 
 // Qwen3-VL over mwip: images and videos are planned like the Qwen3-VL
 // processor (the video as timestamped temporal patches), encoded on the
-// encoder (one artifact per image and per kept frame), and P/D get the
+// encoder (one packed embedding per item), and P/D get the
 // expanded prompt with the artifacts attached.
 func TestQwen3VLImageAndVideoEPD(t *testing.T) {
 	body := qwenMedia("qwen3-vl")
@@ -328,9 +328,8 @@ func TestQwen3VLImageAndVideoEPD(t *testing.T) {
 	}
 	vid, img := mediaItem(t, rr, 0), mediaItem(t, rr, 1)
 	vp, ip := vid["plan"].(map[string]any), img["plan"].(map[string]any)
-	if vp["nframes"] != float64(10) || vp["kept_frames"] != float64(5) || vp["tokens"] != float64(720) || ip["tokens"] != float64(2040) ||
-		fmt.Sprint(ints(vid["placeholder"])) != fmt.Sprint([]int{qwenVStart, qwenVideoPad, qwenVEnd}) || fmt.Sprint(ints(img["placeholder"])) != fmt.Sprint([]int{qwenImagePad}) {
-		t.Fatalf("plans: video %v %v image %v %v", vp, vid["placeholder"], ip, img["placeholder"])
+	if vp["nframes"] != float64(10) || len(vp["frame_indices"].([]any)) != 10 || vp["temporal_patch_size"] != float64(2) || len(vp["timestamps"].([]any)) != 5 || vp["tokens"] != float64(720) || ip["tokens"] != float64(2040) || vid["placeholder"] != nil || img["placeholder"] != nil {
+		t.Fatalf("plans: video %v image %v", vp, ip)
 	}
 	frames := checkPlacements(t, rr, vid)
 	checkPlacements(t, rr, img)
@@ -355,10 +354,11 @@ func TestQwen3VLImageAndVideoEPD(t *testing.T) {
 	}
 	req := lastRequest(t, w)
 	items := path(req, "multimodal", "items").([]any)
-	va, _ := items[0].(map[string]any)["embedding_artifacts"].([]any)
-	ia, _ := items[1].(map[string]any)["embedding_artifacts"].([]any)
-	if len(va) != 5 || len(ia) != 1 || len(req["token_ids"].([]any)) != int(rr["prompt_tokens"].(float64)) {
-		t.Fatalf("%s request: %d video and %d image artifacts", w, len(va), len(ia))
+	for _, item := range items {
+		checkEmbedding(t, item.(map[string]any))
+	}
+	if len(items) != 2 || len(req["token_ids"].([]any)) != int(rr["prompt_tokens"].(float64)) {
+		t.Fatalf("%s request: incorrect item/token counts", w)
 	}
 	if d := num(workerStats(t, "qvl-enc-0"), "encoded") - enc0; d != 2 {
 		t.Fatalf("qvl-enc-0 encoded %v items, want 2", d)
@@ -385,11 +385,12 @@ func TestQwen3VLOnSecondGateway(t *testing.T) {
 	}
 	req := lastRequest(t, w)
 	items := path(req, "multimodal", "items").([]any)
-	va, _ := items[0].(map[string]any)["embedding_artifacts"].([]any)
-	ia, _ := items[1].(map[string]any)["embedding_artifacts"].([]any)
-	if len(va) != 5 || len(ia) != 1 || fmt.Sprint(ints(req["token_ids"])) != fmt.Sprint(ints(rr["token_ids"])) ||
+	for _, item := range items {
+		checkEmbedding(t, item.(map[string]any))
+	}
+	if len(items) != 2 || fmt.Sprint(ints(req["token_ids"])) != fmt.Sprint(ints(rr["token_ids"])) ||
 		countToken(req["token_ids"], qwenVideoPad) != 0 || countToken(req["token_ids"], qwenImagePad) != 0 {
-		t.Fatalf("%s request: %d video and %d image artifacts", w, len(va), len(ia))
+		t.Fatalf("%s request: incorrect item/token mapping", w)
 	}
 	if d := metric(t, gatewayEv, "modelweave_engine_requests_total", `model="qwen3-vl"`, `role="encode"`) - encodes; d != 2 {
 		t.Fatalf("encode calls on gateway-events: %v, want 2", d)

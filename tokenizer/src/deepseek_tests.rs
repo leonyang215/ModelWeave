@@ -321,14 +321,14 @@ fn inline_images_are_measured_and_expanded() {
     let want = ImageTokenSpec::v41().calc_token_count(640, 480).unwrap();
     assert_eq!((item.modality, item.source.kind), ("image", "base64"));
     assert_eq!(item.digest, sha256_hex(&png));
-    assert_eq!(
-        (item.metadata.width, item.metadata.height),
-        (Some(640), Some(480))
-    );
+    assert_eq!((item.plan.width, item.plan.height), {
+        let p = ImageTokenSpec::v41().calc_resize(640, 480).unwrap();
+        (p.best_width as u32, p.best_height as u32)
+    });
     assert_eq!(item.plan.tokens, want);
     assert_eq!(item.placements[0].length, want);
-    assert_eq!(item.placements[0].pad_value, pad_value(&item.digest));
-    assert_eq!(item.placements[0].reference, item.digest);
+    assert_eq!(item.placements[0].pad_value, pad_value(&item.plan_id));
+    assert_eq!(item.placements[0].reference, item.plan_id);
 }
 
 #[test]
@@ -408,10 +408,7 @@ fn videos_become_timestamped_kept_frames() {
     assert_layout(&r);
     let item = &r.multimodal.as_ref().unwrap().items[0];
     assert_eq!(item.modality, "video");
-    assert_eq!(
-        (item.plan.nframes, item.plan.kept_frames),
-        (Some(3), Some(3))
-    );
+    assert_eq!((item.plan.frame_indices.len(), item.plan.groups()), (3, 3));
     assert_eq!(item.plan.timestamps, vec![0.0, 1.0, 2.0]);
     let (w, h) = limit_long_side(1280, 720, 448);
     let per_frame = ImageTokenSpec::v41()
@@ -420,7 +417,8 @@ fn videos_become_timestamped_kept_frames() {
     assert_eq!(item.placements.len(), 3);
     for (k, p) in item.placements.iter().enumerate() {
         assert_eq!((p.modality, p.length), ("frame", per_frame));
-        assert_eq!(p.reference, kept_frame_reference(&digest, k));
+        assert_eq!(p.reference, kept_frame_reference(&item.plan_id, k));
+        assert_eq!(p.embedding_offset, k * item.plan.tokens);
         assert_eq!(p.pad_value, pad_value(&p.reference));
         assert_eq!(p.timestamp, Some(k as f64));
         // The timestamp text precedes each frame.

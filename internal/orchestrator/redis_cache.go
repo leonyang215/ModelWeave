@@ -77,22 +77,22 @@ func (s *redisSessions) Delete(key string) {
 func (s *redisSessions) ForgetWorker(worker string) { s.mutate("session_forget", worker, "") }
 func (s *redisSessions) Len() int                   { return s.mutate("session_len", "", "") }
 
-func (s *redisArtifacts) Get(key string) ([]mwip.EmbeddingArtifact, bool) {
+func (s *redisArtifacts) Get(key string) (mwip.EmbeddingLocation, bool) {
 	v, err := s.command("artifact_get", cacheDigest(key), "")
 	if err != nil || v == "" {
-		return nil, false
+		return mwip.EmbeddingLocation{}, false
 	}
-	var arts []mwip.EmbeddingArtifact
-	if err := json.Unmarshal([]byte(v), &arts); err != nil {
+	var embedding mwip.EmbeddingLocation
+	if err := json.Unmarshal([]byte(v), &embedding); err != nil {
 		if s.onError != nil {
 			s.onError(err)
 		}
-		return nil, false
+		return mwip.EmbeddingLocation{}, false
 	}
-	return arts, true
+	return embedding, true
 }
-func (s *redisArtifacts) Put(key string, arts []mwip.EmbeddingArtifact) {
-	b, err := json.Marshal(arts)
+func (s *redisArtifacts) Put(key string, embedding mwip.EmbeddingLocation) {
+	b, err := json.Marshal(embedding)
 	if err == nil {
 		s.mutate("artifact_put", cacheDigest(key), string(b))
 	}

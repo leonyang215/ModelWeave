@@ -28,6 +28,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/leonyang215/ModelWeave/internal/mwip"
 )
 
 func env(k, def string) string {
@@ -358,17 +360,28 @@ func mediaItem(t *testing.T, rr map[string]any, i int) map[string]any {
 // of the token list with its pad value, computed with the protocol formula.
 func checkPlacements(t *testing.T, rr, item map[string]any) []map[string]any {
 	t.Helper()
+	b, _ := json.Marshal(item)
+	var typed mwip.MediaItem
+	if err := json.Unmarshal(b, &typed); err != nil {
+		t.Fatal(err)
+	}
+	if err := typed.Input().Validate(); err != nil {
+		t.Fatalf("not an authoritative item plan: %v", err)
+	}
 	ids := rr["token_ids"].([]any)
 	if int(rr["prompt_tokens"].(float64)) != len(ids) {
 		t.Fatalf("prompt_tokens %v != len(token_ids) %d", rr["prompt_tokens"], len(ids))
 	}
 	var out []map[string]any
-	for _, p := range item["placements"].([]any) {
+	for k, p := range item["placements"].([]any) {
 		pl := p.(map[string]any)
 		off, n := int(pl["offset"].(float64)), int(pl["length"].(float64))
 		pv := uint32(pl["pad_value"].(float64))
 		if want := padValue(pl["reference"].(string)); pv != want {
 			t.Fatalf("pad_value of %s: %d, the protocol formula gives %d", pl["reference"], pv, want)
+		}
+		if pl["reference"] != mwip.PlacementReference(typed.PlanID, typed.Modality, k) || pl["embedding_offset"] != float64(k*typed.Plan.Tokens) {
+			t.Fatalf("placement is not bound to plan/tensor rows: %v", pl)
 		}
 		if n <= 0 || off+n > len(ids) {
 			t.Fatalf("placement out of range: %v", pl)
@@ -381,6 +394,25 @@ func checkPlacements(t *testing.T, rr, item map[string]any) []map[string]any {
 		out = append(out, pl)
 	}
 	return out
+}
+
+func checkEmbedding(t *testing.T, item map[string]any) {
+	t.Helper()
+	e, ok := item["embedding"].(map[string]any)
+	if !ok || e["uri"] == "" || e["uri"] == nil || e["plan_id"] != item["plan_id"] {
+		t.Fatalf("missing/wrong embedding location: %v", item)
+	}
+	p := item["plan"].(map[string]any)
+	placements := item["placements"].([]any)
+	if e["tokens"] != float64(len(placements))*p["tokens"].(float64) {
+		t.Fatalf("embedding rows differ from plan: %v", item)
+	}
+	for k, raw := range placements {
+		pl := raw.(map[string]any)
+		if pl["embedding_offset"] != float64(k)*p["tokens"].(float64) {
+			t.Fatalf("bad tensor scatter offset: %v", pl)
+		}
+	}
 }
 
 // remoteImage is a chat image block with caller-measured metadata.

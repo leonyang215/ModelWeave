@@ -22,10 +22,12 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
+#[cfg(test)]
+use crate::protocol::Span;
 use crate::protocol::{
     FrameExtractOptions, MediaItem, MediaMetadata, MediaPlan, MediaSource,
     PROTOCOL_CHAT_COMPLETIONS, PROTOCOL_MESSAGES, PROTOCOL_RESPONSES, PixelControlOptions,
-    Placement, Span,
+    Placement,
 };
 use crate::vision::{VideoMeta, VisionSpec};
 
@@ -57,6 +59,43 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
         s.push_str(&format!("{b:02x}"));
     }
     s
+}
+
+/// Language-neutral execution-plan fingerprint (internal/mwip/media.go).
+/// Excludes source URLs and absolute prompt positions so cached embeddings
+/// remain reusable when a signed URL rotates or the conversation grows.
+pub fn plan_id(modality: &str, digest: &str, plan: &MediaPlan) -> String {
+    let mut bytes = b"mwip-media-plan-v2\0".to_vec();
+    fn u64_le(bytes: &mut Vec<u8>, n: u64) {
+        bytes.extend_from_slice(&n.to_le_bytes());
+    }
+    fn string(bytes: &mut Vec<u8>, s: &str) {
+        u64_le(bytes, s.len() as u64);
+        bytes.extend_from_slice(s.as_bytes());
+    }
+    string(&mut bytes, modality);
+    string(&mut bytes, digest);
+    string(&mut bytes, plan.processor);
+    for n in [
+        plan.width as u64,
+        plan.height as u64,
+        plan.tokens as u64,
+        plan.nframes,
+        plan.patch_size as u64,
+        plan.spatial_merge_size as u64,
+        plan.temporal_patch_size as u64,
+    ] {
+        u64_le(&mut bytes, n);
+    }
+    u64_le(&mut bytes, plan.frame_indices.len() as u64);
+    for n in &plan.frame_indices {
+        u64_le(&mut bytes, *n);
+    }
+    u64_le(&mut bytes, plan.timestamps.len() as u64);
+    for n in &plan.timestamps {
+        u64_le(&mut bytes, n.to_bits());
+    }
+    sha256_hex(&bytes)
 }
 
 fn is_digest(s: &str) -> bool {
@@ -351,7 +390,6 @@ pub fn probe_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
 pub struct Planned<'a> {
     pub input: &'a MediaInput,
     pub digest: String,
-    pub metadata: MediaMetadata,
     pub plan: MediaPlan,
 }
 
@@ -381,10 +419,6 @@ fn plan_one<'a>(
     let digest = m.digest()?;
     let (width, height) = m.dimensions()?;
     let at = |e: String| format!("{}: {e}", m.path);
-    let mut metadata = m.metadata.clone();
-    metadata.digest = None;
-    metadata.width = Some(width);
-    metadata.height = Some(height);
     let plan = match m.modality {
         Modality::Image => {
             let low = m.detail.as_deref() == Some("low");
@@ -415,18 +449,16 @@ fn plan_one<'a>(
     Ok(Planned {
         input: m,
         digest,
-        metadata,
         plan,
     })
 }
 
 /// How a model lays media out in its token list.
 pub struct MediaLayout {
-    /// Collapsed form of an image for engines that expand media themselves
-    /// (the model's image placeholder); empty when there is none.
+    /// Collapsed form used only to compare the rendered prompt with HF golden data.
+    #[cfg(test)]
     pub image_placeholder: Vec<u32>,
-    /// Collapsed form of a video; empty when engines cannot expand videos
-    /// themselves.
+    #[cfg(test)]
     pub video_placeholder: Vec<u32>,
     /// Text before each kept video frame, from its timestamp in seconds.
     pub frame_text: fn(f64) -> String,
@@ -464,9 +496,7 @@ pub fn expand(
     }
     let extra: usize = planned
         .iter()
-        .map(|p| {
-            p.plan.tokens * p.plan.kept_frames.unwrap_or(1) + 8 * p.plan.kept_frames.unwrap_or(0)
-        })
+        .map(|p| p.plan.tokens * p.plan.groups() + 8 * p.plan.timestamps.len())
         .sum();
     let mut out = Vec::with_capacity(ids.len() + extra);
     let mut items = Vec::with_capacity(planned.len());
@@ -480,27 +510,29 @@ pub fn expand(
         }
         out.extend_from_slice(&ids[pos..slot.start]);
         pos = slot.start + slot.len;
+        #[cfg(test)]
         let start = out.len();
         let mut placements = Vec::new();
-        let placeholder = match p.input.modality {
+        let plan_id = plan_id(p.input.modality.name(), &p.digest, &p.plan);
+        match p.input.modality {
             Modality::Image => {
-                let pv = pad_value(&p.digest);
+                let pv = pad_value(&plan_id);
                 placements.push(Placement {
                     offset: out.len(),
                     length: p.plan.tokens,
                     pad_value: pv,
-                    reference: p.digest.clone(),
+                    reference: plan_id.clone(),
                     modality: "image",
                     timestamp: None,
+                    embedding_offset: 0,
                 });
                 out.extend(std::iter::repeat_n(pv, p.plan.tokens));
-                layout.image_placeholder.clone()
             }
             Modality::Video => {
                 for (k, ts) in p.plan.timestamps.iter().enumerate() {
                     out.extend(encode(&(layout.frame_text)(*ts))?);
                     out.extend(layout.frame_open);
-                    let reference = kept_frame_reference(&p.digest, k);
+                    let reference = kept_frame_reference(&plan_id, k);
                     let pv = pad_value(&reference);
                     placements.push(Placement {
                         offset: out.len(),
@@ -509,13 +541,13 @@ pub fn expand(
                         reference,
                         modality: "frame",
                         timestamp: Some(*ts),
+                        embedding_offset: k * p.plan.tokens,
                     });
                     out.extend(std::iter::repeat_n(pv, p.plan.tokens));
                     out.extend(layout.frame_close);
                 }
-                layout.video_placeholder.clone()
             }
-        };
+        }
         let m = p.input;
         items.push(MediaItem {
             index: items.len(),
@@ -526,17 +558,19 @@ pub fn expand(
                 url: m.url.clone(),
                 mime: m.mime.clone(),
             },
-            detail: m.detail.clone(),
-            metadata: p.metadata.clone(),
-            pixel_control_options: m.pixel_control.clone(),
-            frame_extract_options: m.frame_extract.clone(),
             plan: p.plan.clone(),
+            plan_id,
+            #[cfg(test)]
             span: Span {
                 offset: start,
                 length: out.len() - start,
             },
             placements,
-            placeholder,
+            #[cfg(test)]
+            placeholder: match p.input.modality {
+                Modality::Image => layout.image_placeholder.clone(),
+                Modality::Video => layout.video_placeholder.clone(),
+            },
         });
     }
     out.extend_from_slice(&ids[pos..]);

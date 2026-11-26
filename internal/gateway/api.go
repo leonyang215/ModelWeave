@@ -179,6 +179,14 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request, protocol strin
 		return
 	}
 	s.met.TokenizerDuration.WithLabelValues("ok").Observe(rec.TokenizeDur.Seconds())
+	if rr.PromptTokens != len(rr.TokenIDs) {
+		fail(&apiError{Status: http.StatusBadGateway, Kind: "invalid_media_plan", Message: "tokenizer prompt_tokens does not match token_ids"})
+		return
+	}
+	if err := mwip.ValidateMedia(rr.TokenIDs, rr.Multimodal); err != nil {
+		fail(&apiError{Status: http.StatusBadGateway, Kind: "invalid_media_plan", Message: "tokenizer execution contract: " + err.Error()})
+		return
+	}
 	rec.PromptTokens, rec.Stream = rr.PromptTokens, rr.Stream
 	if mm := rr.Multimodal; mm != nil {
 		for _, it := range mm.Items {
@@ -188,7 +196,7 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request, protocol strin
 				rec.Images++
 			}
 			s.met.MediaItems.WithLabelValues(m.cfg.Name, it.Modality).Inc()
-			s.met.MediaTokens.WithLabelValues(m.cfg.Name, it.Modality).Add(float64(it.Span.Length))
+			s.met.MediaTokens.WithLabelValues(m.cfg.Name, it.Modality).Add(float64(it.Plan.EmbeddingTokens()))
 		}
 	}
 	// 2. Build the job and its prefix-cache block hashes. Media positions

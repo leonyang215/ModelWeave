@@ -171,6 +171,11 @@ type running struct {
 	kvTokens  int64
 }
 
+type encodedItem struct {
+	Embedding mwip.EmbeddingLocation `json:"embedding"`
+	Plan      mwip.MediaPlan         `json:"plan"`
+}
+
 // Engine is a mock instance.
 type Engine struct {
 	cfg  Config
@@ -184,7 +189,7 @@ type Engine struct {
 	rooms     map[string]chan kvPayload // decode: room -> KV arrival (push)
 	outbox    map[string]kvPayload      // prefill: room -> KV ready for pickup
 	outboxW   map[string]chan struct{}  // prefill: room -> ready signal
-	artifacts map[string]string         // encode: reference -> producing request
+	artifacts map[string]encodedItem    // encode: plan_id -> packed item tensor metadata
 
 	kvUsed        atomic.Int64
 	prefillQueued atomic.Int64
@@ -214,6 +219,7 @@ type Engine struct {
 		LastMode          string
 		LastFinish        string
 		LastRequest       json.RawMessage // the last Generate request, as JSON with proto field names
+		LastEncode        json.RawMessage
 	}
 
 	vocab vocab
@@ -244,7 +250,7 @@ func New(cfg Config) *Engine {
 		rooms:     map[string]chan kvPayload{},
 		outbox:    map[string]kvPayload{},
 		outboxW:   map[string]chan struct{}{},
-		artifacts: map[string]string{},
+		artifacts: map[string]encodedItem{},
 	}
 	e.stats.ByMode = map[string]int{}
 	e.vocab.engine = e
@@ -319,6 +325,7 @@ func (e *Engine) handleStats(w http.ResponseWriter, _ *http.Request) {
 		"stop_string_matches": e.stats.StopMatches, "last_request_id": e.stats.LastRequestID,
 		"last_cached_tokens": e.stats.LastCached, "last_mode": e.stats.LastMode, "last_finish": e.stats.LastFinish,
 		"last_request": e.stats.LastRequest, "cached_blocks": e.kv.len(),
+		"last_encode": e.stats.LastEncode,
 	})
 }
 
@@ -501,15 +508,13 @@ func (e *Engine) prepareMedia(ctx context.Context, g *genReq) (time.Duration, er
 	var delay time.Duration
 	for _, m := range g.media {
 		switch {
-		case len(m.artifacts) > 0:
+		case m.embedding != nil:
 			if e.cfg.VerifyArtifacts {
-				for _, a := range m.artifacts {
-					if err := e.fetchArtifact(ctx, a); err != nil {
-						return 0, err
-					}
+				if err := e.fetchArtifact(ctx, m.input, m.embedding); err != nil {
+					return 0, err
 				}
 			}
-			e.count(func() { e.stats.ArtifactsVerified += len(m.artifacts) })
+			e.count(func() { e.stats.ArtifactsVerified++ })
 		default:
 			delay += e.cfg.EncodeLatency
 			e.count(func() { e.stats.LocalEncoded++ })
@@ -518,7 +523,8 @@ func (e *Engine) prepareMedia(ctx context.Context, g *genReq) (time.Duration, er
 	return delay, nil
 }
 
-func (e *Engine) fetchArtifact(ctx context.Context, uri string) error {
+func (e *Engine) fetchArtifact(ctx context.Context, input mwip.MediaInput, want *mwip.EmbeddingLocation) error {
+	uri := want.URI
 	u := strings.Replace(uri, "mock://", "http://", 1)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
@@ -528,9 +534,19 @@ func (e *Engine) fetchArtifact(ctx context.Context, uri string) error {
 	if err != nil {
 		return fmt.Errorf("embedding %s unreachable: %v", uri, err)
 	}
-	resp.Body.Close()
+	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		return fmt.Errorf("embedding %s missing (%d)", uri, resp.StatusCode)
+	}
+	var item encodedItem
+	if err := json.NewDecoder(resp.Body).Decode(&item); err != nil {
+		return fmt.Errorf("embedding metadata: %w", err)
+	}
+	if err := input.ValidateEmbedding(&item.Embedding); err != nil {
+		return err
+	}
+	if mwip.PlanID(input.Modality, input.Digest, item.Plan) != input.PlanID {
+		return fmt.Errorf("stored tensor was encoded with a different plan")
 	}
 	return nil
 }
@@ -877,11 +893,17 @@ type codeError struct {
 
 func (c *codeError) Error() string { return c.code + ": " + c.msg }
 
-// encode builds mwip embedding artifacts: one per placement (an image, or
-// each kept frame of a video, as the tokenizer planned it).
+// encode executes exactly one frozen item plan. The mock records that plan
+// with a packed tensor location so P/D can verify what was actually produced.
 func (e *Engine) encode(ctx context.Context, req *mwip.EncodeRequest) (*mwip.EncodeResponse, error) {
 	if e.cfg.Role != "encode" {
 		return nil, &codeError{mwip.ErrBadRequest, "not an encode instance", false}
+	}
+	if req.Item == nil {
+		return nil, &codeError{mwip.ErrBadRequest, "Encode requires exactly one item", false}
+	}
+	if err := req.Item.Validate(); err != nil {
+		return nil, &codeError{mwip.ErrBadRequest, "invalid execution plan: " + err.Error(), false}
 	}
 	e.count(func() { e.stats.Encode++ })
 	if e.cfg.FailRate > 0 && rand.Float64() < e.cfg.FailRate {
@@ -893,37 +915,28 @@ func (e *Engine) encode(ctx context.Context, req *mwip.EncodeRequest) (*mwip.Enc
 	}
 	defer e.release(req.AttemptID)
 	t0 := time.Now()
-	frames := 0
-	for _, it := range req.Items {
-		frames += len(it.Placements)
-	}
-	if err := sleepCtx(ctx, time.Duration(len(req.Items))*e.cfg.EncodeLatency+time.Duration(frames)*time.Millisecond); err != nil {
+	if err := sleepCtx(ctx, e.cfg.EncodeLatency+time.Duration(req.Item.Plan.Groups())*time.Millisecond); err != nil {
 		return nil, &codeError{mwip.ErrAborted, err.Error(), true}
 	}
 	resp := &mwip.EncodeResponse{WorkerID: e.cfg.ID}
-	for _, it := range req.Items {
-		for _, p := range it.Placements {
-			e.mu.Lock()
-			e.artifacts[p.Reference] = req.RequestID
-			e.mu.Unlock()
-			resp.Artifacts = append(resp.Artifacts, mwip.EmbeddingArtifact{
-				Reference: p.Reference, URI: e.artifactURI(p.Reference), Tokens: p.Length, Encoder: e.cfg.ID,
-			})
-		}
-	}
+	embedding := mwip.EmbeddingLocation{URI: e.artifactURI(req.Item.PlanID), Tokens: req.Item.Plan.EmbeddingTokens(), PlanID: req.Item.PlanID, Encoder: e.cfg.ID}
+	e.mu.Lock()
+	e.artifacts[req.Item.PlanID] = encodedItem{Embedding: embedding, Plan: req.Item.Plan}
+	e.mu.Unlock()
+	resp.Embedding = &embedding
 	resp.EncodeMS = msSince(t0)
-	e.count(func() { e.stats.Encoded += len(req.Items); e.stats.ByMode["encode"]++ })
+	e.count(func() { e.stats.Encoded++; e.stats.ByMode["encode"]++ })
 	return resp, nil
 }
 
 func (e *Engine) handleArtifact(w http.ResponseWriter, r *http.Request) {
 	ref := r.PathValue("ref")
 	e.mu.Lock()
-	_, ok := e.artifacts[ref]
+	item, ok := e.artifacts[ref]
 	e.mu.Unlock()
 	if !ok {
 		writeErr(w, 404, mwip.ErrArtifact, "unknown artifact", false)
 		return
 	}
-	writeJSON(w, 200, map[string]string{"reference": ref, "encoder": e.cfg.ID})
+	writeJSON(w, 200, item)
 }

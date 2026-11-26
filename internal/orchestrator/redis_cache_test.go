@@ -76,10 +76,10 @@ func TestRedisSharedArtifactsBoundedLRUAndInvalidation(t *testing.T) {
 	a, b, mini := sharedCaches(t)
 	onError := func(err error) { t.Error(err) }
 	ca, cb := orchestrator.NewRedisArtifactCache(a, "m", time.Minute, 2, onError), orchestrator.NewRedisArtifactCache(b, "m", time.Minute, 2, onError)
-	arts := []mwip.EmbeddingArtifact{{Reference: "digest", URI: "s3://test/artifact", Tokens: 16, Encoder: "e0"}}
+	arts := mwip.EmbeddingLocation{PlanID: "plan-id", URI: "s3://test/artifact", Tokens: 16, Encoder: "e0"}
 	ca.Put("a", arts)
 	ca.Put("b", arts)
-	if got, ok := cb.Get("a"); !ok || len(got) != 1 || got[0] != arts[0] {
+	if got, ok := cb.Get("a"); !ok || got != arts {
 		t.Fatalf("shared artifact: %+v %v", got, ok)
 	}
 	cb.Put("c", arts)

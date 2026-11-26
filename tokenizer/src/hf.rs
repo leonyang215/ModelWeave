@@ -346,7 +346,9 @@ impl TemplateRenderer {
                     .slots(v, &raw_ids, &inputs, &media_order)
                     .map_err(|e| bad("media", e))?;
                 let layout = MediaLayout {
+                    #[cfg(test)]
                     image_placeholder: vec![v.image_pad],
+                    #[cfg(test)]
                     video_placeholder: vec![v.start, v.video_pad, v.end],
                     frame_text: |t| format!("<{t:.1} seconds>"),
                     frame_open: Some(v.start),
@@ -434,9 +436,8 @@ impl TemplateRenderer {
             Some(seg) if seg.role == "assistant" && !chat.continue_final => n - seg.offset,
             _ => 0,
         };
-        let multimodal = (!items.is_empty()).then(|| Multimodal {
+        let multimodal = (!items.is_empty()).then_some(Multimodal {
             pad_shift: media::PAD_SHIFT,
-            placeholder_token_id: self.vision.as_ref().map_or(0, |v| v.image_pad),
             items,
         });
         let s = &self.sampling;

@@ -86,7 +86,7 @@ make diagrams   # 重新生成 SVG/PNG；需要 Python 3 和 Graphviz
 
 - [架构](docs/architecture.md)：请求生命周期、执行模式与代码目录
 - [状态与调度](docs/state-and-scheduling.md)：内存/Redis、QoS、插件与权重
-- [mwip](docs/mwip.md) · [接口协议](docs/protocol.md) · [可观测性](docs/observability.md)
+- [mwip](docs/mwip.md) · [多模态执行契约](docs/multimodal.md) · [接口协议](docs/protocol.md) · [可观测性](docs/observability.md)
 - [Tokenizer/模型配置](configs/tokenizer.example.toml) · [本地栈](deploy/compose/README.md)
 
 ## 致谢与许可

@@ -95,7 +95,7 @@ make diagrams   # regenerate SVG/PNG; requires Python 3 and Graphviz
 
 - [Architecture](docs/architecture.md) — request lifecycle, execution modes and code map
 - [State and scheduling](docs/state-and-scheduling.md) — memory/Redis, QoS, plugins and weights
-- [mwip](docs/mwip.md) · [Wire protocols](docs/protocol.md) · [Observability](docs/observability.md)
+- [mwip](docs/mwip.md) · [Multimodal contract](docs/multimodal.md) · [Wire protocols](docs/protocol.md) · [Observability](docs/observability.md)
 - [Tokenizer/model configuration](configs/tokenizer.example.toml) · [Local stack](deploy/compose/README.md)
 
 ## Acknowledgements and license

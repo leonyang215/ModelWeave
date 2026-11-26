@@ -43,8 +43,8 @@ service Engine {
   // request: the engine stops it and frees its KV cache.
   rpc Generate(GenerateRequest) returns (stream GenerateResponse);
 
-  // Encode builds the embeddings of media items on an encode instance: one
-  // artifact per placement of every item.
+  // Encode executes ONE item's authoritative plan and returns ONE packed
+  // visual-embedding location. Batching/parallelism is the gateway's job.
   rpc Encode(EncodeRequest) returns (EncodeResponse);
 
   // Abort stops requests by id. It is best effort: the gateway also cancels
@@ -296,7 +296,7 @@ message Error {
   bool retriable = 3;
 }
 
-// EncodeRequest asks an encode instance for the embeddings of media items.
+// EncodeRequest executes one immutable, request-independent media input.
 message EncodeRequest {
   // Id of the client request.
   string request_id = 1;
@@ -304,16 +304,19 @@ message EncodeRequest {
   string attempt_id = 2;
   // Engine-side model name, as in GenerateRequest.
   string model = 3;
-  // The items as rendered: their plans and placements tell what to build.
-  repeated MediaItem items = 4;
+  reserved 4;
+  reserved "items";
   int64 timeout_ms = 5;
+  MediaInput item = 6;
 }
 
-// EncodeResponse returns one artifact per placement of every item, in item
-// and placement order.
+// EncodeResponse returns the exact item plan's output location. An encoder
+// that cannot honor the plan must fail, never substitute a different plan.
 message EncodeResponse {
-  repeated EmbeddingArtifact artifacts = 1;
+  reserved 1;
+  reserved "artifacts";
   double encode_ms = 2;
+  EmbeddingLocation embedding = 3;
 }
 
 // AbortRequest stops requests.

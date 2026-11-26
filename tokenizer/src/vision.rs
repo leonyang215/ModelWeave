@@ -19,7 +19,7 @@
 //!     processor, two frames form one temporal patch, and the per-frame pixel
 //!     budget follows the reference implementation (qwen-vl-utils).
 //!
-//! Encoders must reproduce the same plan, so every rule is deterministic.
+//! Encoders execute the resulting plan, not a second copy of these rules.
 
 use deepseek_recipe_core::multimodal::ImageTokenSpec;
 use serde_json::Value;
@@ -292,11 +292,27 @@ impl VisionSpec {
             w as u64 * h as u64,
         )?;
         Ok(MediaPlan {
+            processor: match &self.planner {
+                Planner::Deepseek(_) => "deepseek_v4_1.v1",
+                Planner::Qwen(_) => "qwen_vl.v1",
+            },
             width: w,
             height: h,
             tokens,
-            nframes: None,
-            kept_frames: None,
+            nframes: 1,
+            patch_size: match &self.planner {
+                Planner::Deepseek(_) => 14,
+                Planner::Qwen(q) => q.patch_size,
+            },
+            spatial_merge_size: match &self.planner {
+                Planner::Deepseek(_) => 3,
+                Planner::Qwen(q) => q.merge_size,
+            },
+            temporal_patch_size: match &self.planner {
+                Planner::Deepseek(d) => d.video_temporal_patch_size.max(1),
+                Planner::Qwen(q) => q.temporal_patch_size.max(1),
+            },
+            frame_indices: Vec::new(),
             timestamps: Vec::new(),
         })
     }
@@ -331,7 +347,7 @@ impl VisionSpec {
             Planner::Deepseek(d) => plan_video_deepseek(d, video, fps, fixed, pixels)?,
             Planner::Qwen(q) => plan_video_qwen(q, video, fps, fixed, pixels)?,
         };
-        let kept = plan.kept_frames.unwrap_or(1) as u64;
+        let kept = plan.groups() as u64;
         l.check_budget(
             &format!("video frames {}x{} x {kept}", plan.width, plan.height),
             pixels,
@@ -374,12 +390,27 @@ fn plan_video_deepseek(
     let timestamps = (0..kept)
         .map(|k| (k as f64 * tps as f64) / sampling_fps)
         .collect();
+    let total = video.total_frames.unwrap_or_else(|| {
+        (video.duration_ms as f64 / 1000.0 * video.video_fps).round_ties_even() as u64
+    });
+    if total == 0 {
+        return Err("the video has no frames".into());
+    }
+    let frame_indices = (0..nframes)
+        .map(|i| {
+            ((i as f64 / sampling_fps * video.video_fps).round_ties_even() as u64).min(total - 1)
+        })
+        .collect();
     Ok(MediaPlan {
+        processor: "deepseek_v4_1.v1",
         width: r.best_width as u32,
         height: r.best_height as u32,
         tokens: r.token_count,
-        nframes: Some(nframes),
-        kept_frames: Some(kept),
+        nframes,
+        patch_size: 14,
+        spatial_merge_size: 3,
+        temporal_patch_size: tps,
+        frame_indices,
         timestamps,
     })
 }
@@ -453,7 +484,6 @@ fn plan_video_qwen(
         .chunks(tps as usize)
         .map(|c| (c[0] + c[c.len() - 1]) / 2.0)
         .collect();
-    let kept = timestamps.len();
     let (sw, sh) = match pixels.and_then(|p| p.max_long_side) {
         Some(limit) => limit_long_side(video.width, video.height, limit),
         None => (video.width, video.height),
@@ -469,11 +499,15 @@ fn plan_video_qwen(
     }
     let (h, w) = video_smart_resize(n, sh, sw, tps, q.factor(), q.video_min_pixels, max_pixels)?;
     Ok(MediaPlan {
+        processor: "qwen_vl.v1",
         width: w,
         height: h,
         tokens: q.tokens(w, h),
-        nframes: Some(n),
-        kept_frames: Some(kept),
+        nframes: indices.len() as u64,
+        patch_size: q.patch_size,
+        spatial_merge_size: q.merge_size,
+        temporal_patch_size: q.temporal_patch_size.max(1),
+        frame_indices: indices,
         timestamps,
     })
 }
@@ -763,7 +797,9 @@ mod tests {
         let s = VisionSpec::deepseek_v41();
         let v = video(Some(300), 30.0, 10_000);
         let p = s.plan_video(&v, None, 1).unwrap();
-        assert_eq!((p.nframes, p.kept_frames), (Some(20), Some(20)));
+        assert_eq!((p.frame_indices.len(), p.groups()), (20, 20));
+        assert_eq!(p.nframes, 20);
+        assert_eq!(&p.frame_indices[..4], &[0, 15, 30, 45]);
         assert_eq!(p.timestamps.len(), 20);
         assert!((p.timestamps[3] - 1.5).abs() < 1e-9);
         // Frames default to a 672-pixel long side before the model resize.
@@ -832,7 +868,8 @@ mod tests {
             ..Default::default()
         };
         let p = s.plan_video(&v, Some(&one_fps), 1).unwrap();
-        assert_eq!((p.nframes, p.kept_frames), (Some(10), Some(5)));
+        assert_eq!((p.frame_indices.len(), p.groups()), (10, 5));
+        assert_eq!(p.nframes, 10);
         assert_eq!((p.width, p.height, p.tokens), (1152, 640, 720));
         assert_eq!(p.timestamps.len(), 5);
         assert!((p.timestamps[0] - 0.55).abs() < 1e-12);
@@ -849,7 +886,9 @@ mod tests {
             video_fps: 24.0,
         };
         let p = s.plan_video(&short, Some(&five), 1).unwrap();
-        assert_eq!((p.nframes, p.kept_frames), (Some(5), Some(3)));
+        assert_eq!((p.frame_indices.len(), p.groups()), (6, 3));
+        assert_eq!(p.nframes, 6); // includes the explicitly repeated last frame
+        assert_eq!(&p.frame_indices[4..], &[59, 59]);
         assert_eq!((p.width, p.height, p.tokens), (640, 352, 220));
         // Too few frames for one temporal patch.
         let one = VideoMeta {

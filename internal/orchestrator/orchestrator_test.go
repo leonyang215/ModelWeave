@@ -123,17 +123,20 @@ func (e *env) job(prompt int, image bool) *orchestrator.Job {
 		Stream:           true,
 	}
 	if image {
-		const n, pad = 50, 1<<30 + 99
+		const n = 50
 		digest := fmt.Sprintf("%064x", time.Now().UnixNano())
+		plan := mwip.MediaPlan{Processor: "qwen_vl.v1", Width: 320, Height: 160, Tokens: n, NFrames: 1, PatchSize: 16, SpatialMergeSize: 2, TemporalPatchSize: 2}
+		planID := mwip.PlanID("image", digest, plan)
+		pad := mwip.PadValue(planID)
 		img := make([]uint32, n)
 		for i := range img {
 			img[i] = pad
 		}
 		ids = append(append(append([]uint32(nil), ids[:4]...), img...), ids[4:]...)
-		rr.Multimodal = &mwip.Multimodal{PadShift: 1 << 30, PlaceholderTokenID: 129264, Items: []mwip.MediaItem{{
+		rr.Multimodal = &mwip.Multimodal{PadShift: 1 << 30, Items: []mwip.MediaItem{{
 			Modality: "image", Digest: digest, Source: mwip.MediaSource{Kind: "url", URL: "https://img/" + digest},
-			Plan: mwip.MediaPlan{Width: 420, Height: 420, Tokens: n}, Span: mwip.Span{Offset: 4, Length: n},
-			Placements: []mwip.Placement{{Offset: 4, Length: n, PadValue: pad, Reference: digest, Modality: "image"}},
+			Plan: plan, PlanID: planID,
+			Placements: []mwip.Placement{{Offset: 4, Length: n, PadValue: pad, Reference: planID, Modality: "image"}},
 		}}}
 	}
 	rr.TokenIDs, rr.PromptTokens = ids, len(ids)

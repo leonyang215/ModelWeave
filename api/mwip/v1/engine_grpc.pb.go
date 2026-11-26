@@ -66,8 +66,8 @@ type EngineClient interface {
 	// PrefillDone (prefill legs) or Error. Canceling the call aborts the
 	// request: the engine stops it and frees its KV cache.
 	Generate(ctx context.Context, in *GenerateRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[GenerateResponse], error)
-	// Encode builds the embeddings of media items on an encode instance: one
-	// artifact per placement of every item.
+	// Encode executes ONE item's authoritative plan and returns ONE packed
+	// visual-embedding location. Batching/parallelism is the gateway's job.
 	Encode(ctx context.Context, in *EncodeRequest, opts ...grpc.CallOption) (*EncodeResponse, error)
 	// Abort stops requests by id. It is best effort: the gateway also cancels
 	// the Generate call.
@@ -146,8 +146,8 @@ type EngineServer interface {
 	// PrefillDone (prefill legs) or Error. Canceling the call aborts the
 	// request: the engine stops it and frees its KV cache.
 	Generate(*GenerateRequest, grpc.ServerStreamingServer[GenerateResponse]) error
-	// Encode builds the embeddings of media items on an encode instance: one
-	// artifact per placement of every item.
+	// Encode executes ONE item's authoritative plan and returns ONE packed
+	// visual-embedding location. Batching/parallelism is the gateway's job.
 	Encode(context.Context, *EncodeRequest) (*EncodeResponse, error)
 	// Abort stops requests by id. It is best effort: the gateway also cancels
 	// the Generate call.

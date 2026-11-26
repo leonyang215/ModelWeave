@@ -48,7 +48,7 @@ through Redis—never model weights, KV tensors or HTTP request bodies.
 6. **Encode (EPD).** If the prompt has media and the model has encoders,
    every item is encoded on an E instance (`Engine.Encode`, parallel,
    retried on other encoders), which builds content-addressed artifacts
-   (cached; one per placement). No P/D capacity is held meanwhile.
+   (cached; one packed tensor per item). No P/D capacity is held meanwhile.
 7. **Plan + admission queue** (`internal/orchestrator/plan.go`). The planner
    picks the execution mode and reserves workers. When no worker has capacity
    the request waits in the model's admission queue (strict priority classes,
@@ -297,9 +297,12 @@ caller or the inline bytes; every item is planned by the model's vision spec:
 * the long-side limits (`detail: low`, `max_long_side`), `max_total_pixels`
   and source limits apply to every model.
 
-Each rendered placeholder is then replaced by its item's positions, and the
-item records its collapsed form (the model's placeholder) for engines that
-expand media themselves. `max_tokens` is resolved against the context window.
+Each rendered placeholder is replaced by its planned pad ranges. The execution
+contract carries the frozen processor/resize/exact-frame plan, a content+plan
+fingerprint and explicit prompt-offset ↔ packed-tensor-row mappings. Encoder
+RPCs accept one item and return one embedding location; P/D never re-plan from
+the client's original controls. See [multimodal.md](multimodal.md).
+`max_tokens` is resolved against the context window.
 
 Golden tests compare the token IDs of the chat-template renderer with
 transformers' `apply_chat_template` and the reference tokenizer

@@ -200,15 +200,21 @@ func TestQwenMarkupOverMWIP(t *testing.T) {
 // Without embedding artifacts the instance encodes the items itself.
 func TestMediaArriveExpanded(t *testing.T) {
 	w := start(t)
-	const vs, ve, img, f0 = 151652, 151653, 1<<30 + 1, 1<<30 + 2
+	const vs, ve = 151652, 151653
+	ip := mwip.MediaPlan{Processor: "qwen_vl.v1", Width: 96, Height: 32, Tokens: 3, NFrames: 1, PatchSize: 16, SpatialMergeSize: 2, TemporalPatchSize: 2}
+	vp := mwip.MediaPlan{Processor: "qwen_vl.v1", Width: 64, Height: 32, Tokens: 2, NFrames: 2, PatchSize: 16, SpatialMergeSize: 2, TemporalPatchSize: 2, FrameIndices: []uint64{0, 1}, Timestamps: []float64{0.5}}
+	di, dv := strings.Repeat("a", 64), strings.Repeat("b", 64)
+	pi, pv := mwip.PlanID("image", di, ip), mwip.PlanID("video", dv, vp)
+	ref := mwip.PlacementReference(pv, "video", 0)
+	img, f0 := mwip.PadValue(pi), mwip.PadValue(ref)
 	toks := []uint32{0, vs, img, img, img, ve, 27, 15, 29, vs, f0, f0, ve, 42, 128822}
 	r := render(false, false)
 	r.TokenIDs, r.PromptTokens = toks, len(toks)
 	r.Multimodal = &mwip.Multimodal{PadShift: 1 << 30, Items: []mwip.MediaItem{
-		{Index: 0, Modality: "image", Digest: "i", Span: mwip.Span{Offset: 2, Length: 3},
-			Placements: []mwip.Placement{{Offset: 2, Length: 3, PadValue: img}}},
-		{Index: 1, Modality: "video", Digest: "v", Span: mwip.Span{Offset: 6, Length: 7},
-			Placements: []mwip.Placement{{Offset: 10, Length: 2, PadValue: f0}}},
+		{Index: 0, Modality: "image", Digest: di, Source: mwip.MediaSource{Kind: "url", URL: "https://img/i"}, Plan: ip, PlanID: pi,
+			Placements: []mwip.Placement{{Offset: 2, Length: 3, PadValue: img, Reference: pi, Modality: "image"}}},
+		{Index: 1, Modality: "video", Digest: dv, Source: mwip.MediaSource{Kind: "url", URL: "https://img/v"}, Plan: vp, PlanID: pv,
+			Placements: []mwip.Placement{{Offset: 10, Length: 2, PadValue: f0, Reference: ref, Modality: "frame", Timestamp: &vp.Timestamps[0]}}},
 	}}
 	out := run(t, w, r)
 	if out.finish == nil || out.finish.Usage.PromptTokens != len(toks) {

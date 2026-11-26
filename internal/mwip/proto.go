@@ -115,6 +115,9 @@ func intp(p *int32) *int {
 
 // RequestToProto converts a generate request.
 func RequestToProto(r *GenerateRequest) (*mwipv1.GenerateRequest, error) {
+	if err := ValidateMedia(r.TokenIDs, r.Multimodal); err != nil {
+		return nil, err
+	}
 	conv, err := conversationToProto(r.Conversation)
 	if err != nil {
 		return nil, err
@@ -134,13 +137,17 @@ func RequestFromProto(p *mwipv1.GenerateRequest) (*GenerateRequest, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &GenerateRequest{
+	r := &GenerateRequest{
 		RequestID: p.GetRequestId(), Model: p.GetModel(), TokenIDs: p.GetTokenIds(),
 		Multimodal: MultimodalFromProto(p.GetMultimodal()), Conversation: conv,
 		InferenceOptions: inferenceFromProto(p.GetInferenceOptions()), ParsingOptions: parsingFromProto(p.GetParsingOptions()),
 		Disagg: disaggFromProto(p.GetDisagg()), TimeoutMS: p.GetTimeoutMs(), SessionKey: p.GetSessionKey(),
 		Priority: priorities.from[p.GetPriority()],
-	}, nil
+	}
+	if err := ValidateMedia(r.TokenIDs, r.Multimodal); err != nil {
+		return nil, err
+	}
+	return r, nil
 }
 
 // openAITool is an OpenAI function tool as JSON.
@@ -324,7 +331,7 @@ func MultimodalToProto(m *Multimodal) *mwipv1.Multimodal {
 	if m == nil {
 		return nil
 	}
-	return &mwipv1.Multimodal{PadShift: m.PadShift, PlaceholderTokenId: m.PlaceholderTokenID, Items: MediaItemsToProto(m.Items)}
+	return &mwipv1.Multimodal{PadShift: m.PadShift, Items: MediaItemsToProto(m.Items)}
 }
 
 // MultimodalFromProto converts the media of a prompt.
@@ -332,21 +339,33 @@ func MultimodalFromProto(m *mwipv1.Multimodal) *Multimodal {
 	if m == nil {
 		return nil
 	}
-	return &Multimodal{PadShift: m.GetPadShift(), PlaceholderTokenID: m.GetPlaceholderTokenId(), Items: MediaItemsFromProto(m.GetItems())}
+	return &Multimodal{PadShift: m.GetPadShift(), Items: MediaItemsFromProto(m.GetItems())}
 }
 
-func pixelToProto(p *PixelControlOptions) *mwipv1.PixelControlOptions {
-	if p == nil {
-		return nil
-	}
-	return &mwipv1.PixelControlOptions{MaxLongSide: i32(p.MaxLongSide), MaxTotalPixels: p.MaxTotalPixels}
+func planToProto(p MediaPlan) *mwipv1.MediaPlan {
+	return &mwipv1.MediaPlan{Processor: p.Processor, Width: int32(p.Width), Height: int32(p.Height), Tokens: int32(p.Tokens), Nframes: int32(p.NFrames), PatchSize: int32(p.PatchSize), SpatialMergeSize: int32(p.SpatialMergeSize), TemporalPatchSize: int32(p.TemporalPatchSize), FrameIndices: p.FrameIndices, Timestamps: p.Timestamps}
+}
+func planFromProto(p *mwipv1.MediaPlan) MediaPlan {
+	return MediaPlan{Processor: p.GetProcessor(), Width: int(p.GetWidth()), Height: int(p.GetHeight()), Tokens: int(p.GetTokens()), NFrames: int(p.GetNframes()), PatchSize: int(p.GetPatchSize()), SpatialMergeSize: int(p.GetSpatialMergeSize()), TemporalPatchSize: int(p.GetTemporalPatchSize()), FrameIndices: p.GetFrameIndices(), Timestamps: p.GetTimestamps()}
+}
+func sourceToProto(s MediaSource) *mwipv1.MediaSource {
+	return &mwipv1.MediaSource{Kind: s.Kind, Url: s.URL, Mime: s.MIME}
+}
+func sourceFromProto(s *mwipv1.MediaSource) MediaSource {
+	return MediaSource{Kind: s.GetKind(), URL: s.GetUrl(), MIME: s.GetMime()}
 }
 
-func pixelFromProto(p *mwipv1.PixelControlOptions) *PixelControlOptions {
-	if p == nil {
+func InputToProto(in *MediaInput) *mwipv1.MediaInput {
+	if in == nil {
 		return nil
 	}
-	return &PixelControlOptions{MaxLongSide: intp(p.MaxLongSide), MaxTotalPixels: p.MaxTotalPixels}
+	return &mwipv1.MediaInput{Modality: modalities.to[in.Modality], Digest: in.Digest, Source: sourceToProto(in.Source), Plan: planToProto(in.Plan), PlanId: in.PlanID}
+}
+func InputFromProto(in *mwipv1.MediaInput) *MediaInput {
+	if in == nil {
+		return nil
+	}
+	return &MediaInput{Modality: modalities.from[in.GetModality()], Digest: in.GetDigest(), Source: sourceFromProto(in.GetSource()), Plan: planFromProto(in.GetPlan()), PlanID: in.GetPlanId()}
 }
 
 // MediaItemsToProto converts media items.
@@ -359,28 +378,14 @@ func MediaItemsToProto(items []MediaItem) []*mwipv1.MediaItem {
 		it := &items[i]
 		p := &mwipv1.MediaItem{
 			Index: int32(it.Index), Modality: modalities.to[it.Modality], Digest: it.Digest,
-			Source: &mwipv1.MediaSource{Kind: it.Source.Kind, Url: it.Source.URL, Mime: it.Source.MIME},
-			Detail: it.Detail,
-			Metadata: &mwipv1.MediaMetadata{
-				Width: int32(it.Metadata.Width), Height: int32(it.Metadata.Height), DurationMs: it.Metadata.DurationMS,
-				TotalFrames: it.Metadata.TotalFrames, VideoFps: it.Metadata.VideoFPS,
-			},
-			PixelControlOptions: pixelToProto(it.PixelControl),
-			Plan: &mwipv1.MediaPlan{
-				Width: int32(it.Plan.Width), Height: int32(it.Plan.Height), Tokens: int32(it.Plan.Tokens),
-				Nframes: int32(it.Plan.NFrames), KeptFrames: int32(it.Plan.KeptFrames), Timestamps: it.Plan.Timestamps,
-			},
-			Span:               &mwipv1.Span{Offset: int32(it.Span.Offset), Length: int32(it.Span.Length)},
-			Placeholder:        it.Placeholder,
-			EmbeddingArtifacts: ArtifactsToProto(it.Embeddings),
-		}
-		if f := it.FrameExtract; f != nil {
-			p.FrameExtractOptions = &mwipv1.FrameExtractOptions{Fps: f.FPS, Nframes: i32(f.NFrames), PixelControlOptions: pixelToProto(f.PixelControl)}
+			Source: sourceToProto(it.Source), Plan: planToProto(it.Plan), PlanId: it.PlanID,
+			Embedding: EmbeddingToProto(it.Embedding),
 		}
 		for _, pl := range it.Placements {
 			p.Placements = append(p.Placements, &mwipv1.Placement{
 				Offset: int32(pl.Offset), Length: int32(pl.Length), PadValue: pl.PadValue, Reference: pl.Reference,
 				Modality: modalities.to[pl.Modality], Timestamp: pl.Timestamp,
+				EmbeddingOffset: int32(pl.EmbeddingOffset),
 			})
 		}
 		out[i] = p
@@ -395,31 +400,15 @@ func MediaItemsFromProto(items []*mwipv1.MediaItem) []MediaItem {
 	}
 	out := make([]MediaItem, len(items))
 	for i, p := range items {
-		md, plan := p.GetMetadata(), p.GetPlan()
 		it := MediaItem{
 			Index: int(p.GetIndex()), Modality: modalities.from[p.GetModality()], Digest: p.GetDigest(),
-			Source: MediaSource{Kind: p.GetSource().GetKind(), URL: p.GetSource().GetUrl(), MIME: p.GetSource().GetMime()},
-			Detail: p.GetDetail(),
-			Metadata: MediaMetadata{
-				Width: int(md.GetWidth()), Height: int(md.GetHeight()), DurationMS: md.GetDurationMs(),
-				TotalFrames: md.TotalFrames, VideoFPS: md.GetVideoFps(),
-			},
-			PixelControl: pixelFromProto(p.GetPixelControlOptions()),
-			Plan: MediaPlan{
-				Width: int(plan.GetWidth()), Height: int(plan.GetHeight()), Tokens: int(plan.GetTokens()),
-				NFrames: int(plan.GetNframes()), KeptFrames: int(plan.GetKeptFrames()), Timestamps: plan.GetTimestamps(),
-			},
-			Span:        Span{Offset: int(p.GetSpan().GetOffset()), Length: int(p.GetSpan().GetLength())},
-			Placeholder: p.GetPlaceholder(),
-			Embeddings:  ArtifactsFromProto(p.GetEmbeddingArtifacts()),
-		}
-		if f := p.GetFrameExtractOptions(); f != nil {
-			it.FrameExtract = &FrameExtractOptions{FPS: f.Fps, NFrames: intp(f.Nframes), PixelControl: pixelFromProto(f.GetPixelControlOptions())}
+			Source: sourceFromProto(p.GetSource()), Plan: planFromProto(p.GetPlan()), PlanID: p.GetPlanId(), Embedding: EmbeddingFromProto(p.GetEmbedding()),
 		}
 		for _, pl := range p.GetPlacements() {
 			it.Placements = append(it.Placements, Placement{
 				Offset: int(pl.GetOffset()), Length: int(pl.GetLength()), PadValue: pl.GetPadValue(), Reference: pl.GetReference(),
 				Modality: modalities.from[pl.GetModality()], Timestamp: pl.Timestamp,
+				EmbeddingOffset: int(pl.GetEmbeddingOffset()),
 			})
 		}
 		out[i] = it
@@ -427,28 +416,17 @@ func MediaItemsFromProto(items []*mwipv1.MediaItem) []MediaItem {
 	return out
 }
 
-// ArtifactsToProto converts embedding artifacts.
-func ArtifactsToProto(as []EmbeddingArtifact) []*mwipv1.EmbeddingArtifact {
-	if as == nil {
+func EmbeddingToProto(e *EmbeddingLocation) *mwipv1.EmbeddingLocation {
+	if e == nil {
 		return nil
 	}
-	out := make([]*mwipv1.EmbeddingArtifact, len(as))
-	for i, a := range as {
-		out[i] = &mwipv1.EmbeddingArtifact{Reference: a.Reference, Uri: a.URI, Tokens: int32(a.Tokens), Encoder: a.Encoder}
-	}
-	return out
+	return &mwipv1.EmbeddingLocation{Uri: e.URI, Tokens: int32(e.Tokens), PlanId: e.PlanID, Encoder: e.Encoder}
 }
-
-// ArtifactsFromProto converts embedding artifacts.
-func ArtifactsFromProto(as []*mwipv1.EmbeddingArtifact) []EmbeddingArtifact {
-	if as == nil {
+func EmbeddingFromProto(e *mwipv1.EmbeddingLocation) *EmbeddingLocation {
+	if e == nil {
 		return nil
 	}
-	out := make([]EmbeddingArtifact, len(as))
-	for i, a := range as {
-		out[i] = EmbeddingArtifact{Reference: a.GetReference(), URI: a.GetUri(), Tokens: int(a.GetTokens()), Encoder: a.GetEncoder()}
-	}
-	return out
+	return &EmbeddingLocation{URI: e.GetUri(), Tokens: int(e.GetTokens()), PlanID: e.GetPlanId(), Encoder: e.GetEncoder()}
 }
 
 // ---------------------------------------------------------------------------
@@ -612,13 +590,13 @@ func EventFromProto(m *mwipv1.GenerateResponse) *GenerateEvent {
 // EncodeRequestToProto converts an encode request.
 func EncodeRequestToProto(r *EncodeRequest) *mwipv1.EncodeRequest {
 	return &mwipv1.EncodeRequest{RequestId: r.RequestID, AttemptId: r.AttemptID, Model: r.Model,
-		Items: MediaItemsToProto(r.Items), TimeoutMs: r.TimeoutMS}
+		Item: InputToProto(r.Item), TimeoutMs: r.TimeoutMS}
 }
 
 // EncodeRequestFromProto converts a received encode request.
 func EncodeRequestFromProto(p *mwipv1.EncodeRequest) *EncodeRequest {
 	return &EncodeRequest{RequestID: p.GetRequestId(), AttemptID: p.GetAttemptId(), Model: p.GetModel(),
-		Items: MediaItemsFromProto(p.GetItems()), TimeoutMS: p.GetTimeoutMs()}
+		Item: InputFromProto(p.GetItem()), TimeoutMS: p.GetTimeoutMs()}
 }
 
 // ---------------------------------------------------------------------------

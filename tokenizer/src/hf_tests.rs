@@ -131,15 +131,64 @@ fn golden_prompts_match_transformers() {
                 assert!(r.multimodal.is_none(), "{name}");
             }
             Some(expanded) => {
-                assert_eq!(r.token_ids, ids(expanded), "{name}: expanded");
+                // HF golden data uses the older digest-only custom pad IDs.
+                // They are not vocabulary tokens. Compare every text/control
+                // token and pad POSITION against HF, and independently prove
+                // each current content+plan-bound pad below.
+                let normalize = |xs: &[u32]| {
+                    xs.iter()
+                        .map(|id| {
+                            if *id >= crate::media::PAD_SHIFT {
+                                crate::media::PAD_SHIFT
+                            } else {
+                                *id
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                };
+                assert_eq!(
+                    normalize(&r.token_ids),
+                    normalize(&ids(expanded)),
+                    "{name}: expanded layout"
+                );
                 assert_eq!(collapse(&r), ids(&case["token_ids"]), "{name}: collapsed");
                 let mm = r.multimodal.as_ref().unwrap();
                 for (it, plan) in mm.items.iter().zip(case["plans"].as_array().unwrap()) {
                     let got = serde_json::to_value(&it.plan).unwrap();
-                    for k in ["width", "height", "tokens", "nframes", "kept_frames"] {
+                    for k in ["width", "height", "tokens"] {
                         if let Some(want) = plan.get(k) {
                             assert_eq!(&got[k], want, "{name}: plan.{k}");
                         }
+                    }
+                    if let Some(kept) = plan.get("kept_frames").and_then(Value::as_u64) {
+                        assert_eq!(it.plan.groups(), kept as usize, "{name}: temporal groups");
+                    }
+                    if let Some(n) = plan.get("nframes").and_then(Value::as_u64) {
+                        let tps = it.plan.temporal_patch_size as u64;
+                        assert_eq!(
+                            it.plan.frame_indices.len() as u64,
+                            n.div_ceil(tps) * tps,
+                            "{name}: exact padded input frame count"
+                        );
+                    }
+                    assert_eq!(
+                        it.plan_id,
+                        crate::media::plan_id(it.modality, &it.digest, &it.plan)
+                    );
+                    for (k, p) in it.placements.iter().enumerate() {
+                        let reference = if it.modality == "image" {
+                            it.plan_id.clone()
+                        } else {
+                            crate::media::kept_frame_reference(&it.plan_id, k)
+                        };
+                        assert_eq!(p.reference, reference);
+                        assert_eq!(p.embedding_offset, k * it.plan.tokens);
+                        assert_eq!(p.pad_value, pad_value(&reference));
+                        assert!(
+                            r.token_ids[p.offset..p.offset + p.length]
+                                .iter()
+                                .all(|id| *id == p.pad_value)
+                        );
                     }
                     if let Some(ts) = plan.get("timestamps") {
                         let want: Vec<f64> = ts
@@ -407,22 +456,24 @@ fn media_items_carry_placeholders_and_pad_values() {
             {"type": "text", "text": "?"}]}]}),
     );
     let mm = r.multimodal.as_ref().unwrap();
-    assert_eq!(mm.placeholder_token_id, IMAGE_PAD);
     let (img, vid) = (&mm.items[0], &mm.items[1]);
     assert_eq!(img.placeholder, vec![IMAGE_PAD]);
     assert_eq!(vid.placeholder, vec![VISION_START, VIDEO_PAD, VISION_END]);
     // detail: low limits the long side to 512 before smart_resize.
     assert_eq!((img.plan.width, img.plan.height), (512, 352));
     assert_eq!(img.plan.tokens, 16 * 11);
-    assert_eq!(img.placements[0].pad_value, pad_value(&d));
+    assert_eq!(img.placements[0].pad_value, pad_value(&img.plan_id));
     // The image span is its pads, framed by the template's vision tokens.
     assert_eq!(r.token_ids[img.span.offset - 1], VISION_START);
     assert_eq!(r.token_ids[img.span.offset + img.span.length], VISION_END);
     // 4 s at 1 fps: 4 frames, 2 temporal patches; frames capped at 320 px.
-    assert_eq!((vid.plan.nframes, vid.plan.kept_frames), (Some(4), Some(2)));
+    assert_eq!((vid.plan.frame_indices.len(), vid.plan.groups()), (4, 2));
+    assert_eq!(vid.plan.nframes, 4);
+    assert_eq!(vid.plan.frame_indices, vec![0, 33, 66, 99]);
     assert_eq!(vid.placements.len(), 2);
     for (k, p) in vid.placements.iter().enumerate() {
-        assert_eq!(p.reference, format!("{v}_kf_{k:04}"));
+        assert_eq!(p.reference, format!("{}_kf_{k:04}", vid.plan_id));
+        assert_eq!(p.embedding_offset, k * vid.plan.tokens);
         assert_eq!(r.token_ids[p.offset - 1], VISION_START);
         assert_eq!(r.token_ids[p.offset + p.length], VISION_END);
         assert!(

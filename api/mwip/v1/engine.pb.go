@@ -1632,7 +1632,7 @@ func (x *Error) GetRetriable() bool {
 	return false
 }
 
-// EncodeRequest asks an encode instance for the embeddings of media items.
+// EncodeRequest executes one immutable, request-independent media input.
 type EncodeRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Id of the client request.
@@ -1640,10 +1640,9 @@ type EncodeRequest struct {
 	// Id of this encode attempt.
 	AttemptId string `protobuf:"bytes,2,opt,name=attempt_id,json=attemptId,proto3" json:"attempt_id,omitempty"`
 	// Engine-side model name, as in GenerateRequest.
-	Model string `protobuf:"bytes,3,opt,name=model,proto3" json:"model,omitempty"`
-	// The items as rendered: their plans and placements tell what to build.
-	Items         []*MediaItem `protobuf:"bytes,4,rep,name=items,proto3" json:"items,omitempty"`
-	TimeoutMs     int64        `protobuf:"varint,5,opt,name=timeout_ms,json=timeoutMs,proto3" json:"timeout_ms,omitempty"`
+	Model         string      `protobuf:"bytes,3,opt,name=model,proto3" json:"model,omitempty"`
+	TimeoutMs     int64       `protobuf:"varint,5,opt,name=timeout_ms,json=timeoutMs,proto3" json:"timeout_ms,omitempty"`
+	Item          *MediaInput `protobuf:"bytes,6,opt,name=item,proto3" json:"item,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1699,13 +1698,6 @@ func (x *EncodeRequest) GetModel() string {
 	return ""
 }
 
-func (x *EncodeRequest) GetItems() []*MediaItem {
-	if x != nil {
-		return x.Items
-	}
-	return nil
-}
-
 func (x *EncodeRequest) GetTimeoutMs() int64 {
 	if x != nil {
 		return x.TimeoutMs
@@ -1713,12 +1705,19 @@ func (x *EncodeRequest) GetTimeoutMs() int64 {
 	return 0
 }
 
-// EncodeResponse returns one artifact per placement of every item, in item
-// and placement order.
+func (x *EncodeRequest) GetItem() *MediaInput {
+	if x != nil {
+		return x.Item
+	}
+	return nil
+}
+
+// EncodeResponse returns the exact item plan's output location. An encoder
+// that cannot honor the plan must fail, never substitute a different plan.
 type EncodeResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Artifacts     []*EmbeddingArtifact   `protobuf:"bytes,1,rep,name=artifacts,proto3" json:"artifacts,omitempty"`
 	EncodeMs      float64                `protobuf:"fixed64,2,opt,name=encode_ms,json=encodeMs,proto3" json:"encode_ms,omitempty"`
+	Embedding     *EmbeddingLocation     `protobuf:"bytes,3,opt,name=embedding,proto3" json:"embedding,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1753,18 +1752,18 @@ func (*EncodeResponse) Descriptor() ([]byte, []int) {
 	return file_modelweave_mwip_v1_engine_proto_rawDescGZIP(), []int{17}
 }
 
-func (x *EncodeResponse) GetArtifacts() []*EmbeddingArtifact {
-	if x != nil {
-		return x.Artifacts
-	}
-	return nil
-}
-
 func (x *EncodeResponse) GetEncodeMs() float64 {
 	if x != nil {
 		return x.EncodeMs
 	}
 	return 0
+}
+
+func (x *EncodeResponse) GetEmbedding() *EmbeddingLocation {
+	if x != nil {
+		return x.Embedding
+	}
+	return nil
 }
 
 // AbortRequest stops requests.
@@ -2051,19 +2050,19 @@ const file_modelweave_mwip_v1_engine_proto_rawDesc = "" +
 	"\x05Error\x121\n" +
 	"\x04code\x18\x01 \x01(\x0e2\x1d.modelweave.mwip.v1.ErrorCodeR\x04code\x12\x18\n" +
 	"\amessage\x18\x02 \x01(\tR\amessage\x12\x1c\n" +
-	"\tretriable\x18\x03 \x01(\bR\tretriable\"\xb7\x01\n" +
+	"\tretriable\x18\x03 \x01(\bR\tretriable\"\xc3\x01\n" +
 	"\rEncodeRequest\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x1d\n" +
 	"\n" +
 	"attempt_id\x18\x02 \x01(\tR\tattemptId\x12\x14\n" +
-	"\x05model\x18\x03 \x01(\tR\x05model\x123\n" +
-	"\x05items\x18\x04 \x03(\v2\x1d.modelweave.mwip.v1.MediaItemR\x05items\x12\x1d\n" +
+	"\x05model\x18\x03 \x01(\tR\x05model\x12\x1d\n" +
 	"\n" +
-	"timeout_ms\x18\x05 \x01(\x03R\ttimeoutMs\"r\n" +
-	"\x0eEncodeResponse\x12C\n" +
-	"\tartifacts\x18\x01 \x03(\v2%.modelweave.mwip.v1.EmbeddingArtifactR\tartifacts\x12\x1b\n" +
-	"\tencode_ms\x18\x02 \x01(\x01R\bencodeMs\"/\n" +
+	"timeout_ms\x18\x05 \x01(\x03R\ttimeoutMs\x122\n" +
+	"\x04item\x18\x06 \x01(\v2\x1e.modelweave.mwip.v1.MediaInputR\x04itemJ\x04\b\x04\x10\x05R\x05items\"\x83\x01\n" +
+	"\x0eEncodeResponse\x12\x1b\n" +
+	"\tencode_ms\x18\x02 \x01(\x01R\bencodeMs\x12C\n" +
+	"\tembedding\x18\x03 \x01(\v2%.modelweave.mwip.v1.EmbeddingLocationR\tembeddingJ\x04\b\x01\x10\x02R\tartifacts\"/\n" +
 	"\fAbortRequest\x12\x1f\n" +
 	"\vrequest_ids\x18\x01 \x03(\tR\n" +
 	"requestIds\")\n" +
@@ -2157,8 +2156,8 @@ var file_modelweave_mwip_v1_engine_proto_goTypes = []any{
 	(*Conversation)(nil),      // 29: modelweave.mwip.v1.Conversation
 	(*InferenceOptions)(nil),  // 30: modelweave.mwip.v1.InferenceOptions
 	(*ParsingOptions)(nil),    // 31: modelweave.mwip.v1.ParsingOptions
-	(*MediaItem)(nil),         // 32: modelweave.mwip.v1.MediaItem
-	(*EmbeddingArtifact)(nil), // 33: modelweave.mwip.v1.EmbeddingArtifact
+	(*MediaInput)(nil),        // 32: modelweave.mwip.v1.MediaInput
+	(*EmbeddingLocation)(nil), // 33: modelweave.mwip.v1.EmbeddingLocation
 	(*EngineState)(nil),       // 34: modelweave.mwip.v1.EngineState
 }
 var file_modelweave_mwip_v1_engine_proto_depIdxs = []int32{
@@ -2190,8 +2189,8 @@ var file_modelweave_mwip_v1_engine_proto_depIdxs = []int32{
 	17, // 25: modelweave.mwip.v1.Finish.usage:type_name -> modelweave.mwip.v1.Usage
 	18, // 26: modelweave.mwip.v1.Finish.timing:type_name -> modelweave.mwip.v1.Timing
 	4,  // 27: modelweave.mwip.v1.Error.code:type_name -> modelweave.mwip.v1.ErrorCode
-	32, // 28: modelweave.mwip.v1.EncodeRequest.items:type_name -> modelweave.mwip.v1.MediaItem
-	33, // 29: modelweave.mwip.v1.EncodeResponse.artifacts:type_name -> modelweave.mwip.v1.EmbeddingArtifact
+	32, // 28: modelweave.mwip.v1.EncodeRequest.item:type_name -> modelweave.mwip.v1.MediaInput
+	33, // 29: modelweave.mwip.v1.EncodeResponse.embedding:type_name -> modelweave.mwip.v1.EmbeddingLocation
 	34, // 30: modelweave.mwip.v1.GetStateResponse.state:type_name -> modelweave.mwip.v1.EngineState
 	9,  // 31: modelweave.mwip.v1.Engine.Generate:input_type -> modelweave.mwip.v1.GenerateRequest
 	21, // 32: modelweave.mwip.v1.Engine.Encode:input_type -> modelweave.mwip.v1.EncodeRequest

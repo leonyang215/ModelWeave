@@ -7,7 +7,9 @@ import (
 	"reflect"
 	"testing"
 
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
 
 	mwipv1 "github.com/leonyang215/ModelWeave/api/mwip/v1"
 )
@@ -68,11 +70,8 @@ func TestRenderedRequestsRoundTripThroughProto(t *testing.T) {
 		media := rr.Multimodal.Clone()
 		if media != nil {
 			for i := range media.Items {
-				for _, p := range media.Items[i].Placements {
-					media.Items[i].Embeddings = append(media.Items[i].Embeddings, EmbeddingArtifact{
-						Reference: p.Reference, URI: "mock://enc-0/" + p.Reference, Tokens: p.Length, Encoder: "enc-0",
-					})
-				}
+				it := &media.Items[i]
+				it.Embedding = &EmbeddingLocation{URI: "mock://enc-0/" + it.PlanID, Tokens: it.Plan.EmbeddingTokens(), PlanID: it.PlanID, Encoder: "enc-0"}
 			}
 		}
 		for _, d := range []Disagg{
@@ -145,8 +144,28 @@ func TestEncodeRequestRoundTripThroughProto(t *testing.T) {
 	if err := json.Unmarshal(b, &rr); err != nil {
 		t.Fatal(err)
 	}
-	req := &EncodeRequest{RequestID: "mw-1", AttemptID: "mw-1-enc0-1", Model: "qwen3-vl", Items: rr.Multimodal.Items, TimeoutMS: 29000}
-	same(t, "encode request", EncodeRequestFromProto(wire(t, EncodeRequestToProto(req), &mwipv1.EncodeRequest{})), req)
+	for _, it := range rr.Multimodal.Items {
+		input := it.Input()
+		req := &EncodeRequest{RequestID: "mw-1", AttemptID: "mw-1-enc0-1", Model: "qwen3-vl", Item: &input, TimeoutMS: 29000}
+		same(t, "single-item encode request", EncodeRequestFromProto(wire(t, EncodeRequestToProto(req), &mwipv1.EncodeRequest{})), req)
+	}
+}
+
+func TestEncodeIsSingleItemAndHasNoReplanningHints(t *testing.T) {
+	var req mwipv1.EncodeRequest
+	if err := protojson.Unmarshal([]byte(`{"items":[{}]}`), &req); err == nil {
+		t.Fatal("legacy batch accepted as a new encode request")
+	}
+	d := req.ProtoReflect().Descriptor()
+	if d.Fields().ByName("items") != nil || d.Fields().ByName("item") == nil || d.Fields().ByName("item").IsList() {
+		t.Fatal("Encode must have exactly one singular item")
+	}
+	in := (&mwipv1.MediaInput{}).ProtoReflect().Descriptor()
+	for _, name := range []string{"placements", "metadata", "pixel_control_options", "frame_extract_options", "placeholder"} {
+		if in.Fields().ByName(protoreflect.Name(name)) != nil {
+			t.Fatalf("execution input still permits %s", name)
+		}
+	}
 }
 
 // Every value of every protocol enum has an in-memory name, so a value
