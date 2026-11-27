@@ -20,7 +20,7 @@ frontend build, Node runtime, or separate admin service in production.
 - **Scheduling plugins**: compiled plugin catalog, source directories, versions,
   parameter schemas, effective per-model/role weights and editable YAML templates.
   Templates are not live mutations; validate with `modelweave-gateway -check-config`
-  and redeploy. See the [plugin SDK and configuration guide](../plugins/scheduling/README.md).
+  and redeploy. See the [in-repository plugin and configuration guide](../internal/scheduler/plugins/README.md).
 
 The console refreshes every 5 seconds while visible (can be paused), and supports
 manual refresh. Mutations require confirmation; blocking requires a reason. A

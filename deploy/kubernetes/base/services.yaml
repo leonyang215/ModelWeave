@@ -1,0 +1,23 @@
+# Internal only: do not expose the HTTP listener (which also serves /admin)
+# directly to the Internet. Put an authenticated/TLS proxy in front of it.
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway
+  labels: {app.kubernetes.io/name: modelweave, app.kubernetes.io/component: gateway}
+spec:
+  type: ClusterIP
+  selector: {app.kubernetes.io/name: modelweave, app.kubernetes.io/component: gateway}
+  ports:
+    - {name: http, port: 8080, targetPort: http}
+    - {name: mwip-registry, port: 8081, targetPort: mwip-registry}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tokenizer
+  labels: {app.kubernetes.io/name: modelweave, app.kubernetes.io/component: tokenizer}
+spec:
+  type: ClusterIP
+  selector: {app.kubernetes.io/name: modelweave, app.kubernetes.io/component: tokenizer}
+  ports: [{name: http, port: 8090, targetPort: http}]

@@ -13,8 +13,6 @@ RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY api ./api
 COPY cmd ./cmd
 COPY internal ./internal
-COPY pkg ./pkg
-COPY plugins ./plugins
 ARG VERSION=dev
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/ ./cmd/...
@@ -27,6 +25,17 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/src/tokenizer/target \
     cargo build --release --locked && install -D target/release/modelweave-tokenizer /out/modelweave-tokenizer
+
+# Optional unit/contract tests when Rust is not installed on the host. Copies
+# fixtures into the build context only; never writes root-owned host artifacts.
+FROM rust-build AS tokenizer-tests
+COPY tokenizer/testdata ./testdata
+COPY assets/tokenizers /src/assets/tokenizers
+COPY internal/mwip/testdata /src/internal/mwip/testdata
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/src/tokenizer/target \
+    cargo test --release --locked
 
 FROM debian:${DEBIAN_VERSION}-slim AS runtime
 RUN apt-get update \

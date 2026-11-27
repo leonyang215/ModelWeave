@@ -192,13 +192,17 @@ still do the hard check and answer
 
 ## Scheduling
 
-`internal/scheduler` runs one pass per stage:
+`internal/scheduler` coordinates one pass per stage. Contracts, execution runtime,
+mandatory filters, policy implementations and in-tree profile assembly have
+separate dependency layers; see [code organization](code-organization.md).
 
-1. snapshot the candidates of the model and role;
-2. filter: healthy (passive health ejects workers after consecutive transport
-   errors or 5xx), not draining, able to run normal requests when required,
-   capacity (KV, running requests, prefill queue);
-3. prefix-cache lookup through the `kvindex.Index` adapter;
+1. refresh membership and perform advisory prefix-cache lookup through
+   `kvindex.Index`, outside the policy lock;
+2. take a fresh batched snapshot and run mandatory Eligibility/Capacity filters:
+   correct model/role, healthy, not drained/blocked/excluded, normal capability,
+   KV space, running slots and prefill backlog;
+3. distinguish missing eligible instances from temporarily full instances, so
+   existing fail-fast versus admission-queue behaviour is preserved;
 4. load per candidate (queued prefill tokens for P, running requests and KV
    utilization for D);
 5. the registered policy picks; the backend atomically checks the snapshot's

@@ -439,7 +439,7 @@ function renderPlugins() {
     })
     .join(
       "",
-    )}</div>${matches.length ? "" : empty("没有匹配的调度插件", "新插件需通过公开 SDK 注册并重新构建网关，不能仅上传代码文件。")}
+    )}</div>${matches.length ? "" : empty("没有匹配的调度插件", "新插件需在仓库内注册并重新构建网关，不能仅上传代码文件。")}
   <section class="panel composition-panel"><div class="panel-heading"><div><h2>各模型生效组合</h2><p>包含模型默认值与角色覆盖后的实际算法、权重；灰色项已通过零权重禁用。</p></div><span class="panel-kicker">EFFECTIVE ROUTING</span></div><div class="table-scroll"><table><thead><tr><th>模型</th>${roles.map((r) => `<th>${r}</th>`).join("")}</tr></thead><tbody>${models.map((m) => `<tr data-composition="${e(m.name)}"><td><button class="button link model-name" data-detail="model" data-id="${e(m.name)}">${e(m.name)}</button></td>${roles.map((r) => `<td>${composition(m.policies[r])}</td>`).join("")}</tr>`).join("")}</tbody></table></div></section>
   <section class="panel policy-panel"><div class="panel-heading"><div><h2>可用选路策略</h2><p>评分插件通过 weighted 组合；轮询、随机等独立策略不能当作评分项混合。</p></div></div><div class="policy-chips">${plugins.policies.map((name) => tag(name)).join("")}</div></section>`;
 }

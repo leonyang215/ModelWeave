@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net"
 	"net/http"
 	"os"
@@ -75,6 +76,8 @@ func waitFor(t *testing.T, what string, d time.Duration, cond func() bool) {
 type protoEngine struct {
 	mwipv1.UnimplementedEngineServer
 	id       string
+	model    string
+	labels   map[string]string
 	target   string
 	mu       sync.Mutex
 	requests []*mwipv1.GenerateRequest
@@ -131,7 +134,7 @@ func (e *protoEngine) heartbeat() *mwipv1.HeartbeatRequest {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return &mwipv1.HeartbeatRequest{
-		Instance: &mwipv1.Instance{Id: e.id, Model: "external-engine", Role: mwipv1.Role_ROLE_UNIFIED, Target: e.target, MaxRunningRequests: 8},
+		Instance: &mwipv1.Instance{Id: e.id, Model: e.model, Role: mwipv1.Role_ROLE_UNIFIED, Target: e.target, MaxRunningRequests: 8, Labels: maps.Clone(e.labels)},
 		State:    &mwipv1.EngineState{RunningRequests: 0, MaxRunningRequests: 8}, Draining: e.draining,
 	}
 }
@@ -143,7 +146,7 @@ func startProtoEngine(t *testing.T, id string) *protoEngine {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e := &protoEngine{id: id, target: net.JoinHostPort(localIP(t), fmt.Sprint(lis.Addr().(*net.TCPAddr).Port)), beating: true}
+	e := &protoEngine{id: id, model: "external-engine", target: net.JoinHostPort(localIP(t), fmt.Sprint(lis.Addr().(*net.TCPAddr).Port)), beating: true}
 	srv := grpc.NewServer(grpc.MaxRecvMsgSize(64 << 20))
 	mwipv1.RegisterEngineServer(srv, e)
 	go func() { _ = srv.Serve(lis) }()

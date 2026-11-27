@@ -1,0 +1,24 @@
+# Bundled files are relative to the tokenizer image's /opt/modelweave WORKDIR.
+listen = "0.0.0.0:8090"
+
+[[models]]
+name = "DeepSeek-V4.1-Flash"
+aliases = ["deepseek-v4.1", "deepseek-flash"]
+family = "deepseek-v4.1"
+path = "assets/tokenizers/deepseek-v4.1"
+context_length = 1048576
+
+[[models]]
+name = "Qwen3-8B"
+aliases = ["qwen3"]
+family = "qwen3"
+path = "assets/tokenizers/qwen3"
+context_length = 40960
+
+[[models]]
+name = "Qwen3-VL-8B-Instruct"
+aliases = ["qwen3-vl"]
+family = "qwen3-vl"
+path = "assets/tokenizers/qwen3-vl"
+tokenizer_file = "assets/tokenizers/qwen3/tokenizer.json"
+context_length = 262144

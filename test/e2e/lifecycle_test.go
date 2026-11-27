@@ -4,6 +4,7 @@ package e2e
 
 import (
 	"net/http"
+	"os"
 	"testing"
 	"time"
 )
@@ -104,7 +105,14 @@ func TestInstancesMaintainedPerRole(t *testing.T) {
 	// 2. decode-1 stops heartbeating, like a crashed engine: it stays
 	// registered until the TTL (6s) passes, then expires on both gateways.
 	expired := func() float64 {
-		return metric(t, gateway, "modelweave_instance_removals_total", `model="deepseek-v4.1"`, `role="decode"`, `reason="expired"`)
+		total := metric(t, gateway, "modelweave_instance_removals_total", `model="deepseek-v4.1"`, `role="decode"`, `reason="expired"`)
+		// Counters are replica-local: whichever replica commits shared-store
+		// expiry owns this increment. gateway-events has a different state
+		// namespace and must not be included in this fleet's exactly-once sum.
+		if replica := os.Getenv("MW_E2E_GATEWAY_REPLICA"); replica != "" {
+			total += metric(t, replica, "modelweave_instance_removals_total", `model="deepseek-v4.1"`, `role="decode"`, `reason="expired"`)
+		}
+		return total
 	}
 	expired0 := expired()
 	registration(t, "decode-1", "pause")
@@ -118,6 +126,7 @@ func TestInstancesMaintainedPerRole(t *testing.T) {
 		t.Fatalf("decode-1 expired %v after its last heartbeat, before the 6s TTL", d)
 	}
 	waitFor(t, "decode-1 to expire on gateway-events", 5*time.Second, func() bool { _, ok := workers(t, gatewayEv)["decode-1"]; return !ok })
+	waitFor(t, "expiry counter on the committing replica", 5*time.Second, func() bool { return expired()-expired0 >= 1 })
 	if d := expired() - expired0; d != 1 {
 		t.Fatalf("expirations counted: %v", d)
 	}

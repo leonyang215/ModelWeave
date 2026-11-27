@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: modelweave-demo
+  labels:
+    app.kubernetes.io/name: modelweave
+    pod-security.kubernetes.io/enforce: restricted

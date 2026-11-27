@@ -1,0 +1,18 @@
+# Local/demo only: known test credentials and ephemeral Redis, no real engines.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: modelweave-demo
+resources:
+  - ../../base
+  - namespace.yaml
+  - redis.yaml
+  - engines/encode
+  - engines/prefill
+  - engines/decode
+secretGenerator:
+  - name: modelweave-secrets
+    literals:
+      - MW_REDIS_URL=redis://redis:6379/0
+      - MW_CONTROL_TOKEN=demo-control-token
+      - MW_ADMIN_TOKEN=demo-admin-token
+      - MW_API_KEY=demo-api-key

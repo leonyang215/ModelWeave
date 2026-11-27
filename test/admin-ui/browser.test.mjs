@@ -307,7 +307,7 @@ test(
             path: `${artifacts}/scheduling-plugins-desktop.png`,
             fullPage: true,
           });
-          await page.locator("#plugin-search").fill("scheduling/label");
+          await page.locator("#plugin-search").fill("scheduler/plugins/label");
           assert.equal(await page.locator(".plugin-card").count(), 1);
           await page.locator('[data-plugin-example="label"]').click();
           await visible("#details-dialog[open]");

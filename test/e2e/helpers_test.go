@@ -224,6 +224,7 @@ type worker struct {
 	Healthy        bool           `json:"healthy"`
 	Draining       bool           `json:"draining"`
 	AdminDrained   bool           `json:"admin_drained"`
+	Blocked        bool           `json:"blocked"`
 	HeartbeatAgeMS int64          `json:"heartbeat_age_ms"`
 	IndexBlocks    int            `json:"index_blocks"`
 	State          map[string]any `json:"state"`

@@ -118,7 +118,7 @@ models:
       output_tokens: 1024           # output tokens reserved on decode (prompt + min(max_tokens, this))
       block_size: 64                # round KV reservations to blocks
       uncached_beta: 0              # prefill cost w = u*(1+beta*(cached+u/2)); 0 = plain tokens
-    routing:                        # plugins/scheduling/README.md; see gateway.scheduling.example.yaml
+    routing:                        # internal/scheduler/plugins/README.md; see gateway.scheduling.example.yaml
       # Optional model-wide composition for omitted/empty roles. Any non-empty
       # role below replaces this whole policy, rather than merging scorer lists.
       # default:

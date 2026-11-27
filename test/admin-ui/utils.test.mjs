@@ -141,17 +141,17 @@ test("plugin catalog search includes directory and documented parameter names", 
     {
       name: "label",
       description: "Soft preference",
-      source: "plugins/scheduling/label",
+      source: "internal/scheduler/plugins/label",
       parameters: [{ name: "key" }, { name: "value" }],
     },
     {
       name: "load",
       description: "Capacity",
-      source: "plugins/scheduling/load",
+      source: "internal/scheduler/plugins/load",
       parameters: [],
     },
   ];
-  for (const query of [" LABEL ", "value", "scheduling/label", "soft"]) {
+  for (const query of [" LABEL ", "value", "scheduler/plugins/label", "soft"]) {
     assert.deepEqual(
       filterPlugins(plugins, query).map((p) => p.name),
       ["label"],

@@ -13,9 +13,25 @@ it.
 ```sh
 make images   # modelweave/{tokenizer,gateway,mockengine,e2e}:dev
 make up       # start the stack
-make e2e      # 41 end-to-end tests inside the compose network
+make e2e      # end-to-end tests inside this existing compose network
 make down     # stop and remove it
 ```
+
+For a non-invasive regression run instead of reusing a running stack:
+
+```sh
+make test-e2e        # fresh project/network/images, no host ports, automatic cleanup
+make test-e2e-redis  # real Redis + extra gateway replica; same full suite
+```
+
+These targets require Compose with `!reset` override support (2.24.4+), use the
+real Rust tokenizer and 18 GPU-free mock engines, and preserve the default
+`modelweave` compose project. `MW_E2E_KEEP=1` keeps only the new test project for
+debugging; logs/config are saved under `tmp/modelweave-e2e-*/`. To reuse images,
+set `MW_E2E_BUILD=0 MW_E2E_IMAGE_TAG=<already-built-tag>`; all four
+`modelweave/{gateway,tokenizer,mockengine,e2e}:<tag>` images must exist. Set `GO`
+to the Go 1.26+ executable if it is not the default on the host. These are
+**ModelWeave functional tests**, not Kubernetes cluster tests.
 
 | Service | Host port | What it is |
 |---|---|---|

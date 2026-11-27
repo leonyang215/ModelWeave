@@ -1,5 +1,5 @@
 # One gateway, different compositions for every model; no runtime plugin loading.
-# See plugins/scheduling/README.md for the plugin SDK and directory layout.
+# See internal/scheduler/plugins/README.md for the private interfaces and directory layout.
 server:
   listen: ":8080"
   grpc_listen: ":8081"

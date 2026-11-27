@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/leonyang215/ModelWeave/internal/registry"
-	scoring "github.com/leonyang215/ModelWeave/pkg/scheduling"
+	scoring "github.com/leonyang215/ModelWeave/internal/scheduling"
 )
 
 var sdkTestID atomic.Uint64
@@ -27,7 +27,7 @@ func (s *sdkTestScorer) Score(_ *scoring.Request, c *scoring.Candidate, _ []*sco
 func registerSDKTestScorer(t *testing.T, s *sdkTestScorer) string {
 	t.Helper()
 	s.name = fmt.Sprintf("sdk-%s-%d", t.Name(), sdkTestID.Add(1))
-	if err := scoring.Register(scoring.Descriptor{Name: s.name, Version: "test", Description: "External-style test extension."}, func(scoring.Config) (scoring.Scorer, error) {
+	if err := scoring.Register(scoring.Descriptor{Name: s.name, Version: "test", Description: "Repository-private test extension."}, func(scoring.Config) (scoring.Scorer, error) {
 		return s, nil
 	}); err != nil {
 		t.Fatal(err)

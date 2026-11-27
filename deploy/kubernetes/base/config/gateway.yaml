@@ -1,0 +1,47 @@
+# Two or more replicas must use shared Redis, not independent memory stores.
+server:
+  listen: ":8080"
+  grpc_listen: ":8081"
+  log_format: json
+  control_token: "${MW_CONTROL_TOKEN}"
+  admin_token: "${MW_ADMIN_TOKEN}"
+  shutdown_grace: 30s
+tokenizer:
+  endpoints: ["http://tokenizer:8090"]
+  timeout: 30s
+auth: {enabled: true}
+tenants:
+  - name: default
+    api_keys: ["${MW_API_KEY}"]
+    priority: normal
+    max_concurrency: 128
+state:
+  backend: redis
+  redis:
+    url: "${MW_REDIS_URL}"
+    namespace: "${MW_STATE_NAMESPACE}"
+    timeout: 1s
+    lease_ttl: 15s
+discovery: {heartbeat_ttl: 15s}
+engine_state: {stale_after: 10s, poll: {enabled: false}}
+kv_index: {type: events, block_size: 64, optimistic_ttl: 30s}
+models:
+  - name: deepseek-v4.1
+    aliases: [DeepSeek-V4.1-Flash, deepseek-flash]
+    tokenizer_model: DeepSeek-V4.1-Flash
+    mode: auto
+    normal: {enabled: true, session_affinity: true, fallback_to_pd: true}
+    routing:
+      default:
+        scorers: [{name: prefix-cache, weight: 2}, {name: load, weight: 1}]
+      encode: {policy: load}
+  - name: qwen3
+    aliases: [Qwen3-8B]
+    tokenizer_model: Qwen3-8B
+    mode: auto
+    normal: {enabled: true, fallback_to_pd: true}
+  - name: qwen3-vl
+    aliases: [Qwen3-VL-8B-Instruct]
+    tokenizer_model: Qwen3-VL-8B-Instruct
+    mode: auto
+    normal: {enabled: true, fallback_to_pd: true}

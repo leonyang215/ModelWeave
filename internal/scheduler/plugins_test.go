@@ -1,9 +1,11 @@
 package scheduler
 
 import (
+	"fmt"
 	"math"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/leonyang215/ModelWeave/internal/registry"
 )
@@ -62,13 +64,7 @@ func (testScorer) Score(_ *Request, c *Candidate, _ []*Candidate) float64 {
 }
 
 func TestRegisterCustomScorerAndPolicy(t *testing.T) {
-	name := "custom-" + t.Name()
-	t.Cleanup(func() {
-		plugins.Lock()
-		delete(plugins.scorers, name)
-		delete(plugins.policies, name)
-		plugins.Unlock()
-	})
+	name := fmt.Sprintf("custom-%s-%d", t.Name(), time.Now().UnixNano())
 	if err := RegisterScorer(name, func(ScorerConfig) (Scorer, error) { return testScorer{}, nil }); err != nil {
 		t.Fatal(err)
 	}

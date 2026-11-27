@@ -16,7 +16,7 @@ import (
 	"github.com/leonyang215/ModelWeave/internal/kvindex"
 	"github.com/leonyang215/ModelWeave/internal/registry"
 	"github.com/leonyang215/ModelWeave/internal/scheduler"
-	scoring "github.com/leonyang215/ModelWeave/pkg/scheduling"
+	scoring "github.com/leonyang215/ModelWeave/internal/scheduling"
 )
 
 func TestSchedulingPluginCatalogIsAuthenticatedAndComplete(t *testing.T) {
@@ -149,23 +149,23 @@ func TestModelCompositionsChangeRealInferenceRouting(t *testing.T) {
 	}
 }
 
-// This implementation depends only on the public SDK. Registration through
-// this API must be sufficient to configure a new weighted algorithm.
-type externalStyleScorer struct{ name string }
+// This implementation uses only the data-only plugin contract. Adding a
+// repository-local plugin must not require changing the scheduling core.
+type repositoryScorer struct{ name string }
 
-func (s externalStyleScorer) Name() string  { return s.name }
-func (externalStyleScorer) UsesCache() bool { return false }
-func (externalStyleScorer) Score(req *scoring.Request, c *scoring.Candidate, _ []*scoring.Candidate) float64 {
+func (s repositoryScorer) Name() string  { return s.name }
+func (repositoryScorer) UsesCache() bool { return false }
+func (repositoryScorer) Score(req *scoring.Request, c *scoring.Candidate, _ []*scoring.Candidate) float64 {
 	if req.Model == "m" && c.Labels["accelerator"] == "preferred" {
 		return 1
 	}
 	return 0
 }
 
-func TestPublicSDKPluginCanExtendTheGatewayWithoutCoreChanges(t *testing.T) {
-	name := fmt.Sprintf("external-%d", time.Now().UnixNano())
-	if err := scoring.Register(scoring.Descriptor{Name: name, Version: "test", Description: "Public SDK extension."}, func(scoring.Config) (scoring.Scorer, error) {
-		return externalStyleScorer{name: name}, nil
+func TestRepositoryPluginCanExtendTheGatewayWithoutCoreChanges(t *testing.T) {
+	name := fmt.Sprintf("repository-%d", time.Now().UnixNano())
+	if err := scoring.Register(scoring.Descriptor{Name: name, Version: "test", Description: "Repository-private extension."}, func(scoring.Config) (scoring.Scorer, error) {
+		return repositoryScorer{name: name}, nil
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -199,6 +199,6 @@ models:
 	}
 	defer d.Reservation.Release(true)
 	if d.Worker.ID() != "preferred" || d.Scores[name] != 1 {
-		t.Fatalf("external-style extension ignored: %+v", d)
+		t.Fatalf("repository extension ignored: %+v", d)
 	}
 }

@@ -1,0 +1,75 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+  labels: {app.kubernetes.io/name: modelweave, app.kubernetes.io/component: gateway}
+spec:
+  replicas: 2
+  revisionHistoryLimit: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxSurge: 1, maxUnavailable: 0}
+  selector:
+    matchLabels: {app.kubernetes.io/name: modelweave, app.kubernetes.io/component: gateway}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: modelweave, app.kubernetes.io/component: gateway}
+    spec:
+      serviceAccountName: modelweave
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: {app.kubernetes.io/name: modelweave, app.kubernetes.io/component: gateway}
+      containers:
+        - name: gateway
+          image: modelweave/gateway:dev
+          imagePullPolicy: IfNotPresent
+          args: [-config, /etc/modelweave/gateway.yaml]
+          ports:
+            - {name: http, containerPort: 8080}
+            - {name: mwip-registry, containerPort: 8081}
+          env:
+            - name: POD_NAMESPACE
+              valueFrom: {fieldRef: {fieldPath: metadata.namespace}}
+            - {name: MW_STATE_NAMESPACE, value: "modelweave-$(POD_NAMESPACE)-v3"}
+            - name: MW_REDIS_URL
+              valueFrom: {secretKeyRef: {name: modelweave-secrets, key: MW_REDIS_URL}}
+            - name: MW_CONTROL_TOKEN
+              valueFrom: {secretKeyRef: {name: modelweave-secrets, key: MW_CONTROL_TOKEN}}
+            - name: MW_ADMIN_TOKEN
+              valueFrom: {secretKeyRef: {name: modelweave-secrets, key: MW_ADMIN_TOKEN}}
+            - name: MW_API_KEY
+              valueFrom: {secretKeyRef: {name: modelweave-secrets, key: MW_API_KEY}}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources:
+            requests: {cpu: 250m, memory: 256Mi}
+            limits: {cpu: "2", memory: 1Gi}
+          startupProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 2
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 3
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 10
+            timeoutSeconds: 2
+          volumeMounts:
+            - {name: config, mountPath: /etc/modelweave, readOnly: true}
+      volumes:
+        - name: config
+          configMap: {name: gateway-config}

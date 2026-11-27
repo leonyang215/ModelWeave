@@ -12,8 +12,8 @@ their parsed output as SSE or JSON.
 
 - **Multi-model, multimodal.** DeepSeek V4 / V4.1, Qwen3, Qwen3-VL and Hugging
   Face chat templates; content-derived media positions support prefix caching.
-- **Pluggable routing.** Algorithms live in [plugin directories](plugins/scheduling),
-  with a public Go SDK and admin catalog. Compose `prefix-cache`, `load`, `affinity`
+- **Pluggable routing.** Algorithms live in [private plugin directories](internal/scheduler/plugins),
+  with an in-repository extension interface and admin catalog. Compose `prefix-cache`, `load`, `affinity`
   and label preferences with per-model weights and per-role overrides.
 - **Normal, PD and EPD.** Run on one instance, separate prefill/decode, or encode
   media first—with retries, deadlines and fallback.
@@ -78,6 +78,11 @@ state:
 [Full configuration](configs/gateway.example.yaml) · [Redis example](configs/gateway.redis.example.yaml) ·
 [Consistency, migration and scheduling plugins](docs/state-and-scheduling.md)
 
+For Kubernetes, use the [Kustomize base and GPU-free demo overlay](deploy/kubernetes/README.md):
+replicated gateway/tokenizer, shared Redis configuration, private Services,
+secret references, probes and graceful termination. No Kubernetes API access is
+required by the application; see [code organization and framework](docs/code-organization.md).
+
 ## Integrate an engine
 
 1. Implement the [mwip Engine service](proto/modelweave/mwip/v1): `Generate`,
@@ -96,13 +101,16 @@ make build      # gateway, tokenizer and mock engine
 make test       # Go race tests + Rust tests + dependency-free console tests
 make lint       # gofmt, rustfmt and clippy
 make diagrams   # regenerate SVG/PNG; requires Python 3 and Graphviz
+make test-e2e   # fresh isolated full stack; does not touch an existing compose project
+make test-e2e-redis  # same suite with real Redis and another shared-state gateway
 ```
 
 ## Documentation
 
 - [Architecture](docs/architecture.md) — request lifecycle, execution modes and code map
+- [Code organization/framework](docs/code-organization.md) · [Kubernetes deployment](deploy/kubernetes/README.md)
 - [State and scheduling](docs/state-and-scheduling.md) — memory/Redis, QoS, plugins and weights
-- [Plugin SDK and directory](plugins/scheduling/README.md) · [Multi-model weighted configuration](configs/gateway.scheduling.example.yaml)
+- [Plugin interfaces and directory](internal/scheduler/plugins/README.md) · [Multi-model weighted configuration](configs/gateway.scheduling.example.yaml)
 - [Admin console and API](docs/admin.md) — inventory, instance isolation, security and browser tests
 - [mwip](docs/mwip.md) · [Multimodal contract](docs/multimodal.md) · [Wire protocols](docs/protocol.md) · [Observability](docs/observability.md)
 - [Tokenizer/model configuration](configs/tokenizer.example.toml) · [Local stack](deploy/compose/README.md)

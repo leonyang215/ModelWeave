@@ -204,8 +204,8 @@ operations and the QoS wake channel's `PUBLISH`/`SUBSCRIBE` operations.
 
 ## Scheduling plugins and weights
 
-Scoring plugins live in [`plugins/scheduling/`](../plugins/scheduling/README.md)
-and register metadata/factories through the public `pkg/scheduling` SDK.
+Scoring plugins live in [`internal/scheduler/plugins/`](../internal/scheduler/plugins/README.md)
+and register metadata/factories through the private `internal/scheduling` interface.
 `internal/scheduler` composes them and retains the legacy policy/scorer
 registries. They are compiled-in Go plugins, not runtime `.so` loading or an
 executable-directory scan. Adding a scoring plugin requires an import and a new
@@ -215,7 +215,7 @@ binary, not a new switch case in the scheduling loop.
 inherit it; any non-empty role replaces the whole composition without merging.
 Without a model default, historical per-role defaults are unchanged. See the
 [complete multi-model example](../configs/gateway.scheduling.example.yaml) and
-[configuration resolution rules](../plugins/scheduling/README.md#configure-each-model-independently).
+[configuration resolution rules](../internal/scheduler/plugins/README.md#configure-each-model-independently).
 
 The default P/D/unified policy is now **`weighted`**, with two pre-registered
 scorers, each weight **1**. Encode defaults to the `load` policy. Each role of
@@ -262,17 +262,17 @@ list for requests without a session key.
 
 ### Add a plugin
 
-Implement `pkg/scheduling.Scorer`, register a descriptor and factory, and add a
-blank import in `plugins/scheduling/plugins.go` (or a custom gateway binary).
+Implement `internal/scheduling.Scorer` within this repository, register a descriptor
+and factory, and add a blank import in `internal/scheduler/plugins/plugins.go`.
 Then configure `{name: my-scorer, weight: 0.5}` in any model/role. See the
-[SDK guide and complete extension example](../plugins/scheduling/README.md#add-a-plugin).
+[interface guide and complete extension example](../internal/scheduler/plugins/README.md#add-a-plugin).
 Scorers receive detached scheduling views without registry/reservation handles;
 parameter decoding is strict and mutable config maps are not shared across
 factories or introspection. Scorers must be concurrency-safe and not mutate views.
 
 Whole selection policies can still use the in-module `scheduler.Policy` and
 `RegisterPolicy` interface. Existing `RegisterScorer` integrations remain
-supported, while the public SDK is preferred for new code. Nil factories and
+supported, while the data-only private interface is preferred for new code. Nil factories and
 duplicate registrations are rejected; plugin discovery does not invoke factories.
 
 `bin/modelweave-gateway -check-config -config <file>` validates model policies,

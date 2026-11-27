@@ -10,7 +10,7 @@
 ## 核心能力
 
 - **多模型、多模态。** 支持 DeepSeek V4 / V4.1、Qwen3、Qwen3-VL 和 Hugging Face chat template；媒体内容参与前缀缓存哈希。
-- **插件式调度。** 算法按[插件目录](plugins/scheduling)组织，提供公开 Go SDK 和管理台插件清单；每个模型可组合缓存、负载、亲和、标签偏好等算法并配置权重，各角色可独立覆盖。
+- **插件式调度。** 算法按[内部插件目录](internal/scheduler/plugins)组织，提供仓库内扩展接口和管理台插件清单；每个模型可组合缓存、负载、亲和、标签偏好等算法并配置权重，各角色可独立覆盖。
 - **Normal / PD / EPD。** 单实例执行、prefill/decode 分离，或先编码媒体；支持重试、超时和回退。
 - **单机与分布式。** `state.backend` 统一切换内存或 Redis：注册表、实例状态、容量预留、缓存、租户 RPM/TPM/并发额度和按模型的优先级公平队列。
 - **统一引擎协议。** 引擎接收 token 和生成选项，自行反分词、解析输出；网关不适配各引擎的原生 API。
@@ -68,6 +68,10 @@ state:
 [完整配置](configs/gateway.example.yaml) · [Redis 示例](configs/gateway.redis.example.yaml) ·
 [一致性、迁移与调度插件](docs/state-and-scheduling.md)
 
+Kubernetes 部署见 [Kustomize 基础清单与无 GPU demo](deploy/kubernetes/README.md)：
+包含多副本网关/tokenizer、共享 Redis 配置、内部 Service、Secret 引用、探针与优雅退出。
+程序本身无需 Kubernetes API 权限；[代码组织与调度框架](docs/code-organization.md)借鉴 kube-scheduler 的分层。
+
 ## 接入引擎
 
 1. 实现 [mwip Engine 服务](proto/modelweave/mwip/v1)：`Generate`，以及按需实现 `Encode`、`Abort`、`GetState`。
@@ -85,13 +89,16 @@ make build      # 网关、tokenizer、mock 引擎
 make test       # Go race 测试 + Rust 测试 + 无依赖的前端逻辑测试
 make lint       # gofmt、rustfmt、clippy
 make diagrams   # 重新生成 SVG/PNG；需要 Python 3 和 Graphviz
+make test-e2e   # 新建隔离全栈测试，不改动已有 compose 实例
+make test-e2e-redis  # 真实 Redis + 额外共享状态网关副本的完整回归
 ```
 
 ## 文档
 
 - [架构](docs/architecture.md)：请求生命周期、执行模式与代码目录
+- [代码组织与框架](docs/code-organization.md) · [Kubernetes 部署](deploy/kubernetes/README.md)
 - [状态与调度](docs/state-and-scheduling.md)：内存/Redis、QoS、插件与权重
-- [插件目录与 SDK](plugins/scheduling/README.md) · [多模型差异化组合示例](configs/gateway.scheduling.example.yaml)
+- [插件目录与扩展接口](internal/scheduler/plugins/README.md) · [多模型差异化组合示例](configs/gateway.scheduling.example.yaml)
 - [管理平台与 API](docs/admin.md)：资源查询、实例隔离、安全和浏览器测试
 - [mwip](docs/mwip.md) · [多模态执行契约](docs/multimodal.md) · [接口协议](docs/protocol.md) · [可观测性](docs/observability.md)
 - [Tokenizer/模型配置](configs/tokenizer.example.toml) · [本地栈](deploy/compose/README.md)

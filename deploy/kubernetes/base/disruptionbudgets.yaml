@@ -1,0 +1,15 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: gateway}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: modelweave, app.kubernetes.io/component: gateway}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: tokenizer}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: modelweave, app.kubernetes.io/component: tokenizer}

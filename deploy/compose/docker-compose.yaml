@@ -33,7 +33,7 @@ x-build: &build
     no_proxy: ${no_proxy:-}
 
 x-mock: &mock
-  image: modelweave/mockengine:dev
+  image: ${MW_MOCKENGINE_IMAGE:-modelweave/mockengine:dev}
   restart: unless-stopped
   environment: &mock-env
     MOCK_MODEL: deepseek-v4.1
@@ -58,7 +58,7 @@ x-mock: &mock
 
 services:
   tokenizer:
-    image: modelweave/tokenizer:dev
+    image: ${MW_TOKENIZER_IMAGE:-modelweave/tokenizer:dev}
     build: {<<: *build, target: tokenizer}
     restart: unless-stopped
     ports: ["${MW_TOKENIZER_PORT:-38090}:8090"]
@@ -69,7 +69,7 @@ services:
       retries: 30
 
   gateway:
-    image: modelweave/gateway:dev
+    image: ${MW_GATEWAY_IMAGE:-modelweave/gateway:dev}
     build: {<<: *build, target: gateway}
     restart: unless-stopped
     command: ["-config", "/etc/modelweave/gateway.yaml"]
@@ -92,7 +92,7 @@ services:
   # engine KV events (kv_index.type=events), and it runs PD with the pull
   # handshake.
   gateway-events:
-    image: modelweave/gateway:dev
+    image: ${MW_GATEWAY_IMAGE:-modelweave/gateway:dev}
     restart: unless-stopped
     command: ["-config", "/etc/modelweave/gateway.yaml"]
     volumes: ["./gateway-events.yaml:/etc/modelweave/gateway.yaml:ro"]
@@ -253,7 +253,7 @@ services:
     ports: ["${MW_PROMETHEUS_PORT:-39090}:9090"]
 
   e2e:
-    image: modelweave/e2e:dev
+    image: ${MW_E2E_IMAGE:-modelweave/e2e:dev}
     build: {<<: *build, target: e2e}
     profiles: ["test"]
     environment:
@@ -262,6 +262,7 @@ services:
       MW_E2E_TOKENIZER: http://tokenizer:8090
       MW_E2E_REGISTRY: gateway:8081
       MW_E2E_CONTROL_TOKEN: ${MW_CONTROL_TOKEN:-local-control-token}
+      MW_E2E_GATEWAY_REPLICA: ${MW_E2E_GATEWAY_REPLICA:-}
     depends_on:
       gateway: {condition: service_healthy}
       gateway-events: {condition: service_healthy}

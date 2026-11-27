@@ -1,0 +1,51 @@
+# Used only by tools/test-e2e.sh. No host ports, independent project/images,
+# generated private test configs, and an optional real Redis + gateway replica.
+services:
+  tokenizer:
+    ports: !reset []
+    cpus: 2
+    mem_limit: 1g
+  gateway:
+    ports: !reset []
+    volumes: ["${MW_E2E_CONFIG_DIR:?}/gateway.yaml:/etc/modelweave/gateway.yaml:ro"]
+    cpus: 1
+    mem_limit: 512m
+  gateway-events:
+    ports: !reset []
+    volumes: ["${MW_E2E_CONFIG_DIR:?}/gateway-events.yaml:/etc/modelweave/gateway.yaml:ro"]
+    cpus: 1
+    mem_limit: 512m
+  redis:
+    image: redis:7.4-alpine
+    profiles: [redis]
+    command: [redis-server, --save, "", --appendonly, "no", --maxmemory, 128mb, --maxmemory-policy, noeviction]
+    cpus: 0.5
+    mem_limit: 256m
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+  gateway-replica:
+    image: ${MW_GATEWAY_IMAGE:-modelweave/gateway:dev}
+    profiles: [redis]
+    restart: unless-stopped
+    command: [-config, /etc/modelweave/gateway.yaml]
+    volumes: ["${MW_E2E_CONFIG_DIR:?}/gateway.yaml:/etc/modelweave/gateway.yaml:ro"]
+    environment:
+      MW_CONTROL_TOKEN: ${MW_CONTROL_TOKEN:-local-control-token}
+    cpus: 1
+    mem_limit: 512m
+    depends_on:
+      tokenizer: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, curl, -fsS, http://127.0.0.1:8080/readyz]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+  e2e:
+    cpus: 2
+    mem_limit: 1g
+    environment:
+      GOMAXPROCS: "2"
