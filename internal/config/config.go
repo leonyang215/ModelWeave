@@ -6,6 +6,7 @@ import (
 	"math"
 	"net/url"
 	"os"
+	"reflect"
 	"strings"
 	"time"
 
@@ -224,12 +225,38 @@ type Reserve struct {
 	UncachedBeta float64 `yaml:"uncached_beta"`
 }
 
-// Routing holds the scheduling policy per role.
+// Routing holds a model-wide default composition and complete per-role
+// overrides. An empty role inherits Default; without Default, the historical
+// weighted P/D/unified and load-only encode defaults are preserved.
 type Routing struct {
-	Prefill scheduler.PolicyConfig `yaml:"prefill"`
-	Decode  scheduler.PolicyConfig `yaml:"decode"`
-	Encode  scheduler.PolicyConfig `yaml:"encode"`
-	Unified scheduler.PolicyConfig `yaml:"unified"`
+	Default *scheduler.PolicyConfig `yaml:"default"`
+	Prefill scheduler.PolicyConfig  `yaml:"prefill"`
+	Decode  scheduler.PolicyConfig  `yaml:"decode"`
+	Encode  scheduler.PolicyConfig  `yaml:"encode"`
+	Unified scheduler.PolicyConfig  `yaml:"unified"`
+}
+
+func (r Routing) Policy(role registry.Role) scheduler.PolicyConfig {
+	var pc scheduler.PolicyConfig
+	switch role {
+	case registry.RolePrefill:
+		pc = r.Prefill
+	case registry.RoleDecode:
+		pc = r.Decode
+	case registry.RoleEncode:
+		pc = r.Encode
+	case registry.RoleUnified:
+		pc = r.Unified
+	}
+	if reflect.ValueOf(pc).IsZero() {
+		if r.Default != nil {
+			return *r.Default
+		}
+		if role == registry.RoleEncode {
+			return scheduler.PolicyConfig{Name: "load"}
+		}
+	}
+	return pc
 }
 
 // Admission configures queueing and overload protection.
@@ -506,9 +533,14 @@ func (c *Config) validate() error {
 		if len(m.Admission.Overload.Thresholds) != 4 {
 			return fmt.Errorf("model %s: admission.overload.thresholds needs 4 levels", m.Name)
 		}
-		for _, pc := range []scheduler.PolicyConfig{m.Routing.Prefill, m.Routing.Decode, m.Routing.Encode, m.Routing.Unified} {
-			if _, err := scheduler.BuildPolicy(pc, 1); err != nil {
-				return fmt.Errorf("model %s: %w", m.Name, err)
+		if m.Routing.Default != nil {
+			if _, err := scheduler.BuildPolicy(*m.Routing.Default, 1); err != nil {
+				return fmt.Errorf("model %s routing.default: %w", m.Name, err)
+			}
+		}
+		for _, role := range []registry.Role{registry.RolePrefill, registry.RoleDecode, registry.RoleEncode, registry.RoleUnified} {
+			if _, err := scheduler.BuildPolicy(m.Routing.Policy(role), 1); err != nil {
+				return fmt.Errorf("model %s routing.%s: %w", m.Name, role, err)
 			}
 		}
 	}

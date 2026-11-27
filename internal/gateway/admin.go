@@ -30,6 +30,7 @@ func (s *Server) mountAdmin(mux *http.ServeMux) {
 	mux.HandleFunc("POST /admin/workers/{id}/drain", s.control(s.handleDrain))
 	mux.HandleFunc("POST /admin/workers/{id}/resume", s.control(s.handleResume))
 	mux.HandleFunc("GET /admin/stats", s.control(s.handleStats))
+	mux.HandleFunc("GET /admin/scheduling/plugins", s.control(s.handleSchedulingPlugins))
 	mux.HandleFunc("GET /admin/blacklist", s.control(s.handleBlacklist))
 	mux.HandleFunc("PUT /admin/blacklist/{id}", s.control(s.handleBlock))
 	mux.HandleFunc("DELETE /admin/blacklist/{id}", s.control(s.handleUnblock))
@@ -38,6 +39,14 @@ func (s *Server) mountAdmin(mux *http.ServeMux) {
 		mux.HandleFunc("GET /admin/{$}", s.handleAdminUI)
 		mux.HandleFunc("GET /admin/assets/{name}", s.handleAdminUI)
 	}
+}
+
+func (s *Server) handleSchedulingPlugins(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"scorers": scheduler.ScorerCatalog(), "policies": scheduler.RegisteredPolicies(),
+		"combination": "weighted", "formula": "sum(weight * clamp(score, 0, 1))",
+		"loading": "compiled-in", "configuration": "gateway YAML; restart required",
+	})
 }
 
 type instanceCounts struct {

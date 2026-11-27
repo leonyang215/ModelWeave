@@ -54,6 +54,7 @@ tenants: [{name: tenant, api_keys: [sk-tenant-secret-246]}]
 		{"GET", "/admin/models", ""}, {"GET", "/admin/models/m-alias", ""},
 		{"GET", "/admin/workers", ""}, {"GET", "/admin/workers/missing", ""},
 		{"GET", "/admin/stats", ""}, {"GET", "/admin/blacklist", ""},
+		{"GET", "/admin/scheduling/plugins", ""},
 		{"PUT", "/admin/blacklist/offline", `{"reason":"quarantine"}`},
 		{"DELETE", "/admin/blacklist/offline", ""},
 		{"POST", "/admin/workers/missing/drain", ""}, {"POST", "/admin/workers/missing/resume", ""},

@@ -10,7 +10,7 @@
 ## 核心能力
 
 - **多模型、多模态。** 支持 DeepSeek V4 / V4.1、Qwen3、Qwen3-VL 和 Hugging Face chat template；媒体内容参与前缀缓存哈希。
-- **插件式调度。** 默认按权重组合 `prefix-cache`、`load`，各模型、各角色独立配置；支持注册自定义评分器和策略。
+- **插件式调度。** 算法按[插件目录](plugins/scheduling)组织，提供公开 Go SDK 和管理台插件清单；每个模型可组合缓存、负载、亲和、标签偏好等算法并配置权重，各角色可独立覆盖。
 - **Normal / PD / EPD。** 单实例执行、prefill/decode 分离，或先编码媒体；支持重试、超时和回退。
 - **单机与分布式。** `state.backend` 统一切换内存或 Redis：注册表、实例状态、容量预留、缓存、租户 RPM/TPM/并发额度和按模型的优先级公平队列。
 - **统一引擎协议。** 引擎接收 token 和生成选项，自行反分词、解析输出；网关不适配各引擎的原生 API。
@@ -91,6 +91,7 @@ make diagrams   # 重新生成 SVG/PNG；需要 Python 3 和 Graphviz
 
 - [架构](docs/architecture.md)：请求生命周期、执行模式与代码目录
 - [状态与调度](docs/state-and-scheduling.md)：内存/Redis、QoS、插件与权重
+- [插件目录与 SDK](plugins/scheduling/README.md) · [多模型差异化组合示例](configs/gateway.scheduling.example.yaml)
 - [管理平台与 API](docs/admin.md)：资源查询、实例隔离、安全和浏览器测试
 - [mwip](docs/mwip.md) · [多模态执行契约](docs/multimodal.md) · [接口协议](docs/protocol.md) · [可观测性](docs/observability.md)
 - [Tokenizer/模型配置](configs/tokenizer.example.toml) · [本地栈](deploy/compose/README.md)

@@ -34,7 +34,17 @@ models:
     aliases: [DeepSeek-V4.1-Flash, deepseek-flash]
     context_length: 131072
     normal: {enabled: true}
-  - {name: qwen3, aliases: [Qwen3-8B], mode: normal, context_length: 32768}
+    routing:
+      default:
+        scorers: [{name: prefix-cache, weight: 3}, {name: load, weight: 1}]
+      encode: {policy: load}
+  - name: qwen3
+    aliases: [Qwen3-8B]
+    mode: normal
+    context_length: 32768
+    routing:
+      default:
+        scorers: [{name: load, weight: 4}, {name: affinity, weight: 0.5}]
   - {name: qwen3-vl, aliases: [Qwen3-VL-8B-Instruct], mode: pd}
   - {name: future-model, mode: normal}
 `))

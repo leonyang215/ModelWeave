@@ -1,0 +1,50 @@
+# One gateway, different compositions for every model; no runtime plugin loading.
+# See plugins/scheduling/README.md for the plugin SDK and directory layout.
+server:
+  listen: ":8080"
+  grpc_listen: ":8081"
+  admin_token: "${MW_ADMIN_TOKEN}"
+tokenizer:
+  endpoints: ["http://127.0.0.1:8090"]
+
+models:
+  - name: cache-first
+    tokenizer_model: Qwen3-8B
+    mode: normal
+    routing:
+      default:
+        policy: weighted
+        scorers:
+          - {name: prefix-cache, weight: 3}
+          - {name: load, weight: 1}
+      encode: {policy: load} # Complete role override, not a list merge.
+
+  - name: latency-first
+    tokenizer_model: Qwen3-8B
+    mode: normal
+    routing:
+      default:
+        policy: weighted
+        scorers:
+          - {name: prefix-cache, weight: 0.25}
+          - {name: load, weight: 4}
+      prefill:
+        policy: weighted
+        scorers:
+          - {name: load, weight: 1}
+      encode: {policy: load}
+
+  - name: zone-preferred
+    tokenizer_model: Qwen3-8B
+    mode: normal
+    routing:
+      default:
+        policy: weighted
+        scorers:
+          - {name: label, weight: 2, params: {key: zone, value: west}}
+          - {name: load, weight: 1}
+          - {name: affinity, weight: 0.5}
+      encode: {policy: load}
+
+# Engines register one of these model names with the mwip Registry. Label
+# preference is soft: non-matching instances remain valid fallback candidates.

@@ -8,6 +8,8 @@ import {
   filterModels,
   kvRatio,
   mutationSpec,
+  filterPlugins,
+  pluginExample,
 } from "./utils.mjs";
 
 const $ = (id) => document.getElementById(id);
@@ -27,6 +29,7 @@ const pages = {
     "隔离异常实例；规则按实例 ID 生效，不随重新注册消失。",
   ],
   tenants: ["租户配额", "只读查看租户限额、可用余额与全局并发占用。"],
+  plugins: ["调度插件", "浏览可组合算法、参数与各模型实际生效的权重。"],
 };
 const statuses = {
   active: ["可调度", "green-tag"],
@@ -63,6 +66,7 @@ const state = {
   error: "",
   modelQuery: "",
   blockQuery: "",
+  pluginQuery: "",
   filters: { query: "", model: "", role: "", status: "" },
 };
 // Never persist this credential in localStorage, sessionStorage, cookies or URLs.
@@ -150,11 +154,12 @@ async function refresh(closeConnection = false) {
   renderChrome();
   inFlight = (async () => {
     try {
-      const [stats, models, workers, blocks] = await Promise.all([
+      const [stats, models, workers, blocks, plugins] = await Promise.all([
         api("/admin/stats"),
         api("/admin/models"),
         api("/admin/workers"),
         api("/admin/blacklist"),
+        api("/admin/scheduling/plugins"),
       ]);
       if (current !== generation) return false;
       state.data = {
@@ -162,6 +167,7 @@ async function refresh(closeConnection = false) {
         models: models.models || [],
         workers: workers.workers || [],
         blocks: blocks.blacklist || [],
+        plugins,
       };
       state.updatedAt = new Date();
       state.stale = false;
@@ -244,6 +250,7 @@ function renderChrome() {
   $("nav-models").textContent = d ? count(d.models.length) : "—";
   $("nav-workers").textContent = d ? count(d.workers.length) : "—";
   $("nav-blocks").textContent = d ? count(d.blocks.length) : "—";
+  $("nav-plugins").textContent = d ? count(d.plugins.scorers.length) : "—";
   $("connection-label").textContent = state.stale
     ? "同步失败"
     : d
@@ -298,6 +305,7 @@ function render() {
     workers: renderWorkers,
     blacklist: renderBlacklist,
     tenants: renderTenants,
+    plugins: renderPlugins,
   };
   $("content").innerHTML = views[state.page]();
   if (focus && $(focus.id)) {
@@ -404,6 +412,45 @@ function renderTenants() {
       ? `${count(Math.floor(available || 0))} <span class="muted">/ ${count(limit)}</span>`
       : '<span class="muted">不限额</span>';
   return `<p class="section-note">${state.data.stats.qos_backend === "redis" ? "以下并发与余额在整个 Redis namespace 共享，不按网关副本数翻倍。" : "以下限额与余额仅作用于当前网关进程。"} API 密钥不会返回到管理页面。</p><section class="panel"><div class="table-scroll"><table><thead><tr><th>租户</th><th>优先级</th><th>并发占用 / 上限</th><th>RPM 可用 / 限额</th><th>TPM 可用 / 限额</th></tr></thead><tbody>${tenants.length ? tenants.map((t) => `<tr><td class="model-name">${e(t.name)}</td><td>${tag(t.priority, "blue-tag")}</td><td class="mono">${count(t.inflight)} <span class="muted">/ ${t.max_concurrency ? count(t.max_concurrency) : "不限额"}</span></td><td class="mono">${balance(t.rpm_limit, t.rpm_available)}</td><td class="mono">${balance(t.tpm_limit, t.tpm_available)}</td></tr>`).join("") : rowEmpty(5, "未配置租户配额")}</tbody></table></div><div class="table-note">配额配置是只读的；修改租户、密钥、模型和调度策略仍通过网关 YAML 配置发布。</div></section>`;
+}
+
+function composition(policy) {
+  const scorers = policy.scorers || [];
+  return `<div class="composition-name mono">${e(policy.name)}</div><div class="composition-terms">${scorers.length ? scorers.map((s) => `<span class="composition-chip${s.weight === 0 ? " disabled-term" : ""}" title="${e(s.params ? JSON.stringify(s.params) : "无参数")}">${e(s.name)} <strong>× ${e(s.weight)}</strong></span>`).join("") : '<span class="muted">独立选路策略</span>'}</div>`;
+}
+
+function renderPlugins() {
+  const { plugins, models } = state.data;
+  const matches = filterPlugins(plugins.scorers, state.pluginQuery);
+  return `<div class="plugin-notice"><strong>编译期插件 · 按模型组合</strong><span>总分 = Σ（算法权重 × 评分），权重是相对系数而非概率。配置由网关 YAML 发布并在重启后生效；本页不直接修改线上调度。</span></div>
+  <div class="filter-bar"><input id="plugin-search" type="search" aria-label="搜索调度插件" placeholder="搜索算法名称、目录或参数…" value="${e(state.pluginQuery)}"><span class="section-note">${matches.length} / ${plugins.scorers.length} 个评分插件</span></div>
+  <div class="models-grid plugins-grid">${matches
+    .map((plugin) => {
+      const usages = models.flatMap((m) =>
+        roles
+          .filter((role) =>
+            (m.policies[role].scorers || []).some(
+              (s) => s.name === plugin.name && s.weight > 0,
+            ),
+          )
+          .map((role) => [m.name, role]),
+      );
+      return `<article class="panel plugin-card" data-plugin="${e(plugin.name)}"><div class="model-card-head"><h2>${e(plugin.name)}</h2>${tag(plugin.version, "blue-tag")}</div><p class="plugin-description">${e(plugin.description)}</p><div class="plugin-source mono">${e(plugin.source || "compiled-in extension")}</div><div class="plugin-parameters">${plugin.parameters.length ? plugin.parameters.map((p) => `<span class="tag" title="${e(p.description)}">${e(p.name)} · ${e(p.type)}${p.required ? " *" : ""}</span>`).join("") : '<span class="muted">无配置参数</span>'}</div><div class="model-card-footer"><span class="plugin-usage">${new Set(usages.map(([name]) => name)).size} 个模型 / ${usages.length} 个角色启用</span><button class="button link" data-plugin-example="${e(plugin.name)}">配置示例 →</button></div></article>`;
+    })
+    .join(
+      "",
+    )}</div>${matches.length ? "" : empty("没有匹配的调度插件", "新插件需通过公开 SDK 注册并重新构建网关，不能仅上传代码文件。")}
+  <section class="panel composition-panel"><div class="panel-heading"><div><h2>各模型生效组合</h2><p>包含模型默认值与角色覆盖后的实际算法、权重；灰色项已通过零权重禁用。</p></div><span class="panel-kicker">EFFECTIVE ROUTING</span></div><div class="table-scroll"><table><thead><tr><th>模型</th>${roles.map((r) => `<th>${r}</th>`).join("")}</tr></thead><tbody>${models.map((m) => `<tr data-composition="${e(m.name)}"><td><button class="button link model-name" data-detail="model" data-id="${e(m.name)}">${e(m.name)}</button></td>${roles.map((r) => `<td>${composition(m.policies[r])}</td>`).join("")}</tr>`).join("")}</tbody></table></div></section>
+  <section class="panel policy-panel"><div class="panel-heading"><div><h2>可用选路策略</h2><p>评分插件通过 weighted 组合；轮询、随机等独立策略不能当作评分项混合。</p></div></div><div class="policy-chips">${plugins.policies.map((name) => tag(name)).join("")}</div></section>`;
+}
+
+function showPluginExample(name) {
+  const plugin = state.data.plugins.scorers.find((p) => p.name === name);
+  if (!plugin) return;
+  $("details-title").textContent = `${name} · 配置示例`;
+  $("details-content").innerHTML =
+    `<p class="dialog-description">将模型名和参数替换为实际值，合并至网关 YAML，再校验并发布新配置。角色配置会完整覆盖 routing.default，不合并算法列表。</p><pre>${e(pluginExample(plugin))}</pre><h3 class="detail-section">插件参数</h3><pre>${e(JSON.stringify(plugin.parameters, null, 2))}</pre>`;
+  $("details-dialog").showModal();
 }
 
 function showDetails(kind, id) {
@@ -567,6 +614,8 @@ $("content").addEventListener("click", (event) => {
   if (!button || button.disabled || !state.data) return;
   if (button.dataset.detail)
     showDetails(button.dataset.detail, button.dataset.id);
+  else if (button.dataset.pluginExample)
+    showPluginExample(button.dataset.pluginExample);
   else if (button.dataset.action)
     showAction(button.dataset.action, button.dataset.id);
   else if (button.dataset.modelWorkers !== undefined) {
@@ -585,6 +634,7 @@ function updateSearch(event) {
   const { id, value } = event.target;
   if (id === "model-search") state.modelQuery = value;
   else if (id === "block-search") state.blockQuery = value;
+  else if (id === "plugin-search") state.pluginQuery = value;
   else if (id === "worker-search") state.filters.query = value;
   else return;
   render();

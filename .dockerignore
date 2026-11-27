@@ -4,3 +4,4 @@ tmp/
 tokenizer/target/
 **/*.log
 deploy/compose/data/
+**/node_modules/

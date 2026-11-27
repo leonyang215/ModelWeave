@@ -71,6 +71,56 @@ export function kvRatio(w) {
     : null;
 }
 
+export function filterPlugins(plugins, query) {
+  const q = query.trim().toLowerCase();
+  return plugins.filter((plugin) =>
+    [
+      plugin.name,
+      plugin.description,
+      plugin.source,
+      ...(plugin.parameters || []).map((p) => p.name),
+    ].some((v) =>
+      String(v || "")
+        .toLowerCase()
+        .includes(q),
+    ),
+  );
+}
+
+// Generates an editable YAML template, not a live routing mutation. JSON
+// quoted strings are valid YAML scalars, including unusual plugin names.
+export function pluginExample(plugin) {
+  const params = plugin.parameters || [];
+  const lines = [
+    "models:",
+    '  - name: "your-model"',
+    "    routing:",
+    "      default:",
+    "        policy: weighted",
+    "        scorers:",
+    `          - name: ${JSON.stringify(plugin.name)}`,
+    `            weight: ${plugin.name === "load" ? 1 : 2}`,
+  ];
+  if (params.length) {
+    lines.push("            params:");
+    for (const param of params) {
+      const value =
+        plugin.name === "label" && param.name === "key"
+          ? "zone"
+          : plugin.name === "label" && param.name === "value"
+            ? "west"
+            : `<${param.name}>`;
+      lines.push(
+        `              ${JSON.stringify(param.name)}: ${JSON.stringify(value)}`,
+      );
+    }
+  }
+  if (plugin.name !== "load")
+    lines.push('          - name: "load"', "            weight: 1");
+  lines.push('      encode: {policy: "load"}');
+  return lines.join("\n");
+}
+
 export function mutationSpec(action, id, reason = "") {
   if (!id.trim() || new TextEncoder().encode(id).length > 256) {
     throw new Error("实例 ID 不能为空，且不能超过 256 字节。");

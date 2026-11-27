@@ -17,6 +17,10 @@ frontend build, Node runtime, or separate admin service in production.
   inspect the reason and last rule-update time.
 - **Tenant quotas**: read-only configured limits, balances and concurrency. API
   keys are never returned. YAML remains the source of model/tenant/routing config.
+- **Scheduling plugins**: compiled plugin catalog, source directories, versions,
+  parameter schemas, effective per-model/role weights and editable YAML templates.
+  Templates are not live mutations; validate with `modelweave-gateway -check-config`
+  and redeploy. See the [plugin SDK and configuration guide](../plugins/scheduling/README.md).
 
 The console refreshes every 5 seconds while visible (can be paused), and supports
 manual refresh. Mutations require confirmation; blocking requires a reason. A
@@ -109,6 +113,7 @@ by canonical model name or instance ID and return `[]`, not `null`, when empty.
 | GET | `/admin/workers` | `{"workers":[...]}`: existing fields plus labels, capacity, block metadata, report status |
 | GET | `/admin/workers/{id}` | one registered instance; offline/unknown IDs return `404` |
 | GET | `/admin/stats` | existing statistics plus `ready`, `uptime_seconds`, `admin_auth_required` |
+| GET | `/admin/scheduling/plugins` | scoring plugin metadata, available policy names, composition formula and loading/configuration mode |
 | POST | `/admin/workers/{id}/drain` | set operator drain; legacy `?undo=1` still resumes |
 | POST | `/admin/workers/{id}/resume` | clear operator drain only |
 | GET | `/admin/blacklist` | `{"blacklist":[{"id":"...","reason":"...","blocked_at_ms":...}]}` |
@@ -179,6 +184,7 @@ make test-admin-browser
 
 Browser tests cover login/expiry, alias search, composed instance filters,
 confirmation/cancellation, drain/block/resume/unblock, offline rules, outage
-recovery, XSS-safe rendering and mobile overflow. They save desktop/mobile
+recovery, XSS-safe rendering, scheduling plugin discovery/templates, per-model
+weights and mobile overflow. They save desktop/mobile
 screenshots under `tmp/admin-ui/` (override with `MW_ADMIN_ARTIFACTS`). They do not
 use production services or GPUs. Normal Go tests skip this optional browser test.

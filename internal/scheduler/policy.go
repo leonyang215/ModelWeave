@@ -166,6 +166,13 @@ func (p *SessionAffinity) UsesCache() bool {
 	return p.Fallback != nil && p.Fallback.UsesCache()
 }
 
+func (p *SessionAffinity) Scorers() []ScorerConfig {
+	if fallback, ok := p.Fallback.(interface{ Scorers() []ScorerConfig }); ok {
+		return fallback.Scorers()
+	}
+	return nil
+}
+
 func (p *SessionAffinity) Pick(req *Request, cands []*Candidate) (*Candidate, string) {
 	if req.SessionKey == "" {
 		if p.Fallback == nil {

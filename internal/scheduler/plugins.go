@@ -2,21 +2,25 @@ package scheduler
 
 import (
 	"fmt"
+	"maps"
 	"math"
 	"sort"
 	"strings"
 	"sync"
 
-	"github.com/zeebo/xxh3"
+	scoring "github.com/leonyang215/ModelWeave/pkg/scheduling"
+	_ "github.com/leonyang215/ModelWeave/plugins/scheduling"
+	"github.com/leonyang215/ModelWeave/plugins/scheduling/load"
+	"github.com/leonyang215/ModelWeave/plugins/scheduling/prefixcache"
 )
 
 // PolicyFactory creates a policy per model/role. Plugins register at startup
 // (usually in init); adding one never requires editing BuildPolicy.
 type PolicyFactory func(PolicyConfig, float64) (Policy, error)
 
-// Scorer is a composable scheduling plugin. Score is a preference in [0,1],
-// higher is better. Implementations must be concurrency-safe and must not
-// mutate candidates. Capacity/health filtering always precedes scoring.
+// Scorer is the legacy in-module extension interface. New plugins should use
+// pkg/scheduling.Scorer, which exposes no registry/reservation handles. Both
+// forms can be composed without changing existing in-module integrations.
 type Scorer interface {
 	Name() string
 	UsesCache() bool
@@ -27,11 +31,7 @@ type ScorerFactory func(ScorerConfig) (Scorer, error)
 
 // ScorerConfig configures one term of the weighted score. An explicit zero
 // weight disables the term; an omitted list uses prefix-cache=1 and load=1.
-type ScorerConfig struct {
-	Name   string         `yaml:"name" json:"name"`
-	Weight float64        `yaml:"weight" json:"weight"`
-	Params map[string]any `yaml:"params,omitempty" json:"params,omitempty"`
-}
+type ScorerConfig = scoring.Config
 
 var plugins = struct {
 	sync.RWMutex
@@ -63,6 +63,9 @@ func RegisterScorer(name string, factory ScorerFactory) error {
 	if _, ok := plugins.scorers[name]; ok {
 		return fmt.Errorf("scorer %q already registered", name)
 	}
+	if _, ok := scoring.Lookup(name); ok {
+		return fmt.Errorf("scorer %q already registered", name)
+	}
 	plugins.scorers[name] = factory
 	return nil
 }
@@ -79,19 +82,38 @@ func RegisteredPolicies() []string {
 }
 
 func RegisteredScorers() []string {
+	catalog := ScorerCatalog()
+	names := make([]string, len(catalog))
+	for i, d := range catalog {
+		names[i] = d.Name
+	}
+	return names
+}
+
+// ScorerCatalog lists the compiled SDK plugins plus legacy registrations.
+// It is metadata only; discovery never instantiates parameterized plugins.
+func ScorerCatalog() []scoring.Descriptor {
+	out := scoring.Catalog()
 	plugins.RLock()
 	defer plugins.RUnlock()
-	names := make([]string, 0, len(plugins.scorers))
 	for n := range plugins.scorers {
-		names = append(names, n)
+		out = append(out, scoring.Descriptor{Name: n, Version: "legacy", Description: "In-module scheduling extension.", Parameters: []scoring.Parameter{}})
 	}
-	sort.Strings(names)
-	return names
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
 }
 
 type scorerTerm struct {
 	scorer Scorer
+	plugin scoring.Scorer
 	config ScorerConfig
+}
+
+func (t scorerTerm) usesCache() bool {
+	if t.plugin != nil {
+		return t.plugin.UsesCache()
+	}
+	return t.scorer.UsesCache()
 }
 
 // Scored ranks candidates by sum(weight * plugin score). Scores are exposed
@@ -104,7 +126,7 @@ type Scored struct {
 func (p *Scored) Name() string { return p.name }
 func (p *Scored) UsesCache() bool {
 	for _, t := range p.terms {
-		if t.config.Weight > 0 && t.scorer.UsesCache() {
+		if t.config.Weight > 0 && t.usesCache() {
 			return true
 		}
 	}
@@ -114,20 +136,44 @@ func (p *Scored) UsesCache() bool {
 func (p *Scored) Scorers() []ScorerConfig {
 	out := make([]ScorerConfig, 0, len(p.terms))
 	for _, t := range p.terms {
-		// Do not expose a plugin's mutable configuration map.
-		out = append(out, ScorerConfig{Name: t.config.Name, Weight: t.config.Weight})
+		// Every config was JSON-validated and detached on construction. Never
+		// expose its private nested maps to API callers or plugin factories.
+		copy, _ := t.config.Clone()
+		out = append(out, copy)
 	}
 	return out
 }
 
 func (p *Scored) Pick(req *Request, cands []*Candidate) (*Candidate, string) {
-	for _, c := range cands {
+	var views []*scoring.Candidate
+	for _, term := range p.terms {
+		if term.plugin != nil && term.config.Weight > 0 {
+			views = make([]*scoring.Candidate, len(cands))
+			values := make([]scoring.Candidate, len(cands))
+			for i, c := range cands {
+				values[i] = scoring.Candidate{
+					ID: c.Snap.Spec.ID, Model: c.Snap.Spec.Model, Role: string(c.Snap.Spec.Role), Labels: maps.Clone(c.Snap.Spec.Labels),
+					CachedBlocks: c.CachedBlocks, CachedTokens: c.CachedTokens, CacheRatio: c.CacheRatio,
+					Load: c.Load, NormLoad: c.NormLoad, Inflight: c.Snap.Inflight, KVUsed: c.Snap.EffectiveKVUsed, KVCapacity: c.Snap.KVCapacity,
+				}
+				views[i] = &values[i]
+			}
+			break
+		}
+	}
+	viewReq := &scoring.Request{Model: req.Model, Role: string(req.Role), PromptTokens: req.PromptTokens, SessionKey: req.SessionKey}
+	for i, c := range cands {
 		c.Score, c.Scores = 0, make(map[string]float64, len(p.terms))
 		for _, term := range p.terms {
 			if term.config.Weight == 0 {
 				continue
 			}
-			v := term.scorer.Score(req, c, cands)
+			var v float64
+			if term.plugin != nil {
+				v = term.plugin.Score(viewReq, views[i], views)
+			} else {
+				v = term.scorer.Score(req, c, cands)
+			}
 			// A faulty plugin cannot poison the ranking with NaN/Inf.
 			if math.IsNaN(v) || math.IsInf(v, 0) {
 				v = 0
@@ -143,6 +189,14 @@ func (p *Scored) Pick(req *Request, cands []*Candidate) (*Candidate, string) {
 	}
 	if best.Scores["prefix-cache"] > 0 {
 		return best, "score_cache"
+	}
+	for name, v := range best.Scores {
+		if name != "load" && v > 0 {
+			return best, "score_weighted"
+		}
+	}
+	if _, ok := best.Scores["load"]; !ok {
+		return best, "score_weighted"
 	}
 	return best, "score_load"
 }
@@ -165,17 +219,31 @@ func BuildScored(configs []ScorerConfig) (*Scored, error) {
 		plugins.RLock()
 		f := plugins.scorers[cfg.Name]
 		plugins.RUnlock()
-		if f == nil {
+		_, sdk := scoring.Lookup(cfg.Name)
+		if f != nil && sdk {
+			return nil, fmt.Errorf("scorer %q registered through both SDK and legacy interfaces", cfg.Name)
+		}
+		if f == nil && !sdk {
 			return nil, fmt.Errorf("unknown scorer %q (registered: %s)", cfg.Name, strings.Join(RegisteredScorers(), ", "))
 		}
-		s, err := f(cfg)
+		copy, err := cfg.Clone()
+		if err != nil {
+			return nil, fmt.Errorf("scorer %q: invalid params: %w", cfg.Name, err)
+		}
+		term := scorerTerm{config: copy}
+		if sdk {
+			term.plugin, err = scoring.Build(cfg)
+		} else {
+			factoryConfig, _ := copy.Clone()
+			term.scorer, err = f(factoryConfig)
+			if err == nil && term.scorer == nil {
+				err = fmt.Errorf("factory returned nil")
+			}
+		}
 		if err != nil {
 			return nil, fmt.Errorf("scorer %q: %w", cfg.Name, err)
 		}
-		if s == nil {
-			return nil, fmt.Errorf("scorer %q: factory returned nil", cfg.Name)
-		}
-		p.terms = append(p.terms, scorerTerm{scorer: s, config: cfg})
+		p.terms = append(p.terms, term)
 		sum += cfg.Weight
 	}
 	if sum <= 0 || math.IsInf(sum, 0) {
@@ -187,46 +255,23 @@ func BuildScored(configs []ScorerConfig) (*Scored, error) {
 // PrefixCacheScorer rewards the fraction of prompt tokens already resident.
 type PrefixCacheScorer struct{}
 
-func (PrefixCacheScorer) Name() string                                           { return "prefix-cache" }
-func (PrefixCacheScorer) UsesCache() bool                                        { return true }
-func (PrefixCacheScorer) Score(_ *Request, c *Candidate, _ []*Candidate) float64 { return c.CacheRatio }
+func (PrefixCacheScorer) Name() string    { return "prefix-cache" }
+func (PrefixCacheScorer) UsesCache() bool { return true }
+func (PrefixCacheScorer) Score(_ *Request, c *Candidate, _ []*Candidate) float64 {
+	return (prefixcache.Scorer{}).Score(nil, &scoring.Candidate{CacheRatio: c.CacheRatio}, nil)
+}
 
 // LoadScorer rewards spare capacity. NormLoad incorporates prefill backlog,
 // running/waiting requests and KV utilization according to the instance role.
 type LoadScorer struct{}
 
-func (LoadScorer) Name() string                                           { return "load" }
-func (LoadScorer) UsesCache() bool                                        { return false }
-func (LoadScorer) Score(_ *Request, c *Candidate, _ []*Candidate) float64 { return 1 - c.NormLoad }
-
-type affinityScorer struct{}
-
-func (affinityScorer) Name() string    { return "affinity" }
-func (affinityScorer) UsesCache() bool { return false }
-func (affinityScorer) Score(req *Request, c *Candidate, cs []*Candidate) float64 {
-	if req.SessionKey == "" {
-		return 0
-	}
-	weight := xxh3.HashString(req.SessionKey + "\x00" + c.Snap.Spec.ID)
-	for _, other := range cs {
-		if xxh3.HashString(req.SessionKey+"\x00"+other.Snap.Spec.ID) > weight {
-			return 0
-		}
-	}
-	return 1
+func (LoadScorer) Name() string    { return "load" }
+func (LoadScorer) UsesCache() bool { return false }
+func (LoadScorer) Score(_ *Request, c *Candidate, _ []*Candidate) float64 {
+	return (load.Scorer{}).Score(nil, &scoring.Candidate{NormLoad: c.NormLoad}, nil)
 }
 
 func init() {
-	for name, scorer := range map[string]Scorer{
-		"prefix-cache": PrefixCacheScorer{}, "load": LoadScorer{}, "affinity": affinityScorer{},
-	} {
-		_ = RegisterScorer(name, func(c ScorerConfig) (Scorer, error) {
-			if len(c.Params) != 0 {
-				return nil, fmt.Errorf("does not accept params")
-			}
-			return scorer, nil
-		})
-	}
 	_ = RegisterPolicy("weighted", func(pc PolicyConfig, _ float64) (Policy, error) {
 		if pc.Scorers != nil && (pc.CacheWeight != 0 || pc.LoadWeight != 0 || pc.AffinityWeight != 0) {
 			return nil, fmt.Errorf("use scorers or legacy cache/load/affinity weights, not both")

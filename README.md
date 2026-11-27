@@ -12,8 +12,9 @@ their parsed output as SSE or JSON.
 
 - **Multi-model, multimodal.** DeepSeek V4 / V4.1, Qwen3, Qwen3-VL and Hugging
   Face chat templates; content-derived media positions support prefix caching.
-- **Pluggable routing.** Weighted `prefix-cache` and `load` scorers, configurable
-  per model and role; custom scorers and selection policies register as plugins.
+- **Pluggable routing.** Algorithms live in [plugin directories](plugins/scheduling),
+  with a public Go SDK and admin catalog. Compose `prefix-cache`, `load`, `affinity`
+  and label preferences with per-model weights and per-role overrides.
 - **Normal, PD and EPD.** Run on one instance, separate prefill/decode, or encode
   media first—with retries, deadlines and fallback.
 - **Standalone or distributed.** One `state.backend` switch selects memory or
@@ -101,6 +102,7 @@ make diagrams   # regenerate SVG/PNG; requires Python 3 and Graphviz
 
 - [Architecture](docs/architecture.md) — request lifecycle, execution modes and code map
 - [State and scheduling](docs/state-and-scheduling.md) — memory/Redis, QoS, plugins and weights
+- [Plugin SDK and directory](plugins/scheduling/README.md) · [Multi-model weighted configuration](configs/gateway.scheduling.example.yaml)
 - [Admin console and API](docs/admin.md) — inventory, instance isolation, security and browser tests
 - [mwip](docs/mwip.md) · [Multimodal contract](docs/multimodal.md) · [Wire protocols](docs/protocol.md) · [Observability](docs/observability.md)
 - [Tokenizer/model configuration](configs/tokenizer.example.toml) · [Local stack](deploy/compose/README.md)

@@ -33,7 +33,7 @@ test: test-go test-rust test-admin-ui
 
 test-go:
 	$(GO) vet ./...
-	$(GO) test -race -count=1 ./api/... ./internal/...
+	$(GO) test -race -count=1 ./api/... ./internal/... ./pkg/... ./plugins/...
 
 test-rust:
 	cd tokenizer && $(CARGO) test --locked
@@ -51,7 +51,7 @@ diagrams:
 	$(PYTHON) tools/render_diagrams.py
 
 lint:
-	gofmt -l api cmd internal test | (! grep .)
+	gofmt -l api cmd internal pkg plugins test | (! grep .)
 	cd tokenizer && $(CARGO) fmt --check && $(CARGO) clippy --locked --all-targets -- -D warnings
 
 # Container images (BuildKit; pass proxies through when needed).

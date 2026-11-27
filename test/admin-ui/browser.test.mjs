@@ -280,6 +280,63 @@ test(
       );
 
       await t.test(
+        "plugin catalog exposes per-model compositions and editable YAML templates",
+        async () => {
+          await page.locator('a[data-page="plugins"]').click();
+          await visible("#plugin-search");
+          assert.equal(
+            await page.locator('#navigation [aria-current="page"]').count(),
+            1,
+          );
+          assert.equal(
+            await page
+              .locator('#navigation [aria-current="page"]')
+              .getAttribute("data-page"),
+            "plugins",
+          );
+          assert.ok((await page.locator(".plugin-card").count()) >= 4);
+          const cache = page.locator('[data-composition="deepseek-v4.1"]');
+          await cache.waitFor();
+          assert.match(await cache.innerText(), /prefix-cache\s+× 3/);
+          const qwen = page.locator('[data-composition="qwen3"]');
+          assert.match(await qwen.innerText(), /load\s+× 4/);
+          assert.match(await qwen.innerText(), /affinity\s+× 0.5/);
+          await page.locator("#toast").waitFor({ state: "hidden" });
+          await page.mouse.move(0, 0);
+          await page.screenshot({
+            path: `${artifacts}/scheduling-plugins-desktop.png`,
+            fullPage: true,
+          });
+          await page.locator("#plugin-search").fill("scheduling/label");
+          assert.equal(await page.locator(".plugin-card").count(), 1);
+          await page.locator('[data-plugin-example="label"]').click();
+          await visible("#details-dialog[open]");
+          const template = await page
+            .locator("#details-content pre")
+            .first()
+            .innerText();
+          assert.match(template, /routing:\n      default:/);
+          assert.match(template, /"key": "zone"/);
+          assert.match(template, /"value": "west"/);
+          await page.locator("#close-details").click();
+          await page.locator("#plugin-search").fill("");
+          await page.locator("#plugin-search").blur();
+          await page.setViewportSize({ width: 390, height: 844 });
+          assert.equal(
+            await page.evaluate(
+              () => document.documentElement.scrollWidth <= window.innerWidth,
+            ),
+            true,
+          );
+          await page.screenshot({
+            path: `${artifacts}/scheduling-plugins-mobile.png`,
+            fullPage: true,
+          });
+          await page.setViewportSize({ width: 1440, height: 1024 });
+        },
+      );
+
+      await t.test(
         "mobile layout and credential expiry leave no stale privileged content",
         async () => {
           await page.locator('a[data-page="overview"]').click();

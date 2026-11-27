@@ -1015,6 +1015,94 @@ pre {
   z-index: 9;
   border: 1px solid #dfca95;
 }
+.plugin-notice {
+  display: grid;
+  gap: 5px;
+  margin-bottom: 20px;
+  padding: 15px 18px;
+  border: 1px solid #dce9e1;
+  border-radius: 8px;
+  background: #eff7f2;
+  color: #507563;
+  font-size: 11px;
+}
+.plugin-notice strong {
+  color: #316b4d;
+  font-weight: 600;
+}
+.plugins-grid {
+  margin-bottom: 24px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.plugin-card {
+  padding: 22px;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.plugin-description {
+  color: #7c8993;
+  font-size: 11px;
+  line-height: 1.9;
+  min-height: 62px;
+}
+.plugin-source {
+  background: #f6f8f8;
+  color: #738c80;
+  padding: 8px 10px;
+  border-radius: 5px;
+}
+.plugin-parameters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 15px 0;
+  font-size: 10px;
+}
+.plugin-usage {
+  font-size: 10px;
+  color: #96a19b;
+  padding-top: 4px;
+}
+.composition-panel {
+  margin-bottom: 22px;
+}
+.composition-panel td {
+  vertical-align: top;
+}
+.composition-name {
+  color: #81938b;
+  margin-bottom: 8px;
+  font-size: 10px;
+}
+.composition-terms {
+  display: grid;
+  gap: 6px;
+  font-size: 10px;
+}
+.composition-chip {
+  background: #f2f7f4;
+  border: 1px solid #e1eae4;
+  border-radius: 4px;
+  padding: 3px 7px;
+  color: #587d66;
+  display: flex;
+  gap: 9px;
+  justify-content: space-between;
+}
+.composition-chip strong {
+  font-weight: 550;
+  color: #325e47;
+}
+.disabled-term,
+.disabled-term strong {
+  color: #a5ada8;
+  background: #f5f6f5;
+}
+.policy-panel .policy-chips {
+  padding: 0 21px 20px;
+}
+
 @media (min-width: 1600px) {
   main {
     padding: 0 50px;

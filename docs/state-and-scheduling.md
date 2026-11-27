@@ -204,10 +204,18 @@ operations and the QoS wake channel's `PUBLISH`/`SUBSCRIBE` operations.
 
 ## Scheduling plugins and weights
 
-Policies and scoring plugins have thread-safe named factory registries in
-`internal/scheduler`. They are compiled-in Go plugins, not runtime `.so`
-loading. `BuildPolicy` resolves registered factories; adding a policy does
-not require a new central switch case.
+Scoring plugins live in [`plugins/scheduling/`](../plugins/scheduling/README.md)
+and register metadata/factories through the public `pkg/scheduling` SDK.
+`internal/scheduler` composes them and retains the legacy policy/scorer
+registries. They are compiled-in Go plugins, not runtime `.so` loading or an
+executable-directory scan. Adding a scoring plugin requires an import and a new
+binary, not a new switch case in the scheduling loop.
+
+`models[].routing.default` defines a model-wide composition. Omitted/empty roles
+inherit it; any non-empty role replaces the whole composition without merging.
+Without a model default, historical per-role defaults are unchanged. See the
+[complete multi-model example](../configs/gateway.scheduling.example.yaml) and
+[configuration resolution rules](../plugins/scheduling/README.md#configure-each-model-independently).
 
 The default P/D/unified policy is now **`weighted`**, with two pre-registered
 scorers, each weight **1**. Encode defaults to the `load` policy. Each role of
@@ -233,6 +241,7 @@ routing:
 | `prefix-cache` | fraction of prompt tokens cached on the candidate (0..1) |
 | `load` | `1 - normalized_load`; P uses queued prefill work, E uses running requests, D/unified use running/waiting requests and KV utilization |
 | `affinity` (optional) | 1 for the session's rendezvous-hashed worker, 0 otherwise |
+| `label` (optional) | 1 for an exact instance-label match; `params: {key: zone, value: west}`; a soft preference, not a hard filter |
 
 `score = Σ(weight × scorer_score)`; the highest score wins, with random tie
 breaking. Plugin scores are bounded to [0,1] (NaN/Inf becomes 0). Weights
@@ -253,33 +262,27 @@ list for requests without a session key.
 
 ### Add a plugin
 
-Implement `scheduler.Scorer` and register its factory from a package imported
-by the gateway binary. For example, in the ModelWeave module:
+Implement `pkg/scheduling.Scorer`, register a descriptor and factory, and add a
+blank import in `plugins/scheduling/plugins.go` (or a custom gateway binary).
+Then configure `{name: my-scorer, weight: 0.5}` in any model/role. See the
+[SDK guide and complete extension example](../plugins/scheduling/README.md#add-a-plugin).
+Scorers receive detached scheduling views without registry/reservation handles;
+parameter decoding is strict and mutable config maps are not shared across
+factories or introspection. Scorers must be concurrency-safe and not mutate views.
 
-```go
-type MyScorer struct{}
+Whole selection policies can still use the in-module `scheduler.Policy` and
+`RegisterPolicy` interface. Existing `RegisterScorer` integrations remain
+supported, while the public SDK is preferred for new code. Nil factories and
+duplicate registrations are rejected; plugin discovery does not invoke factories.
 
-func (MyScorer) Name() string    { return "my-scorer" }
-func (MyScorer) UsesCache() bool { return false }
-func (MyScorer) Score(req *scheduler.Request, c *scheduler.Candidate, all []*scheduler.Candidate) float64 {
-    if c.Snap.Spec.Labels["preferred"] == "true" { return 1 }
-    return 0
-}
+`bin/modelweave-gateway -check-config -config <file>` validates model policies,
+weights and plugin parameters without connecting to backends. Configuration is
+static for the life of a gateway: deploy/restart all replicas with consistent
+configuration to apply changes; there is no hidden live-config store.
 
-func init() {
-    if err := scheduler.RegisterScorer("my-scorer", func(cfg scheduler.ScorerConfig) (scheduler.Scorer, error) {
-        return MyScorer{}, nil // validate cfg.Params here if the plugin takes options
-    }); err != nil { panic(err) }
-}
-```
-
-Then add `{name: my-scorer, weight: 0.5}` to `scorers`. Scorers must be
-concurrency-safe and must not mutate candidates. A whole selection algorithm
-can instead implement `scheduler.Policy` and call `RegisterPolicy` with its
-factory; all built-ins use the same registration mechanism. Nil factories
-and duplicate registrations are rejected. `RegisteredPolicies` and
-`RegisteredScorers` expose the available names.
-
+The admin **调度插件** page and authenticated `GET /admin/scheduling/plugins`
+expose the plugin catalog, versions, directories and parameter descriptions.
+The UI also lists effective per-model/role combinations and YAML templates.
 `Decision.Score` and `Decision.Scores` expose the chosen worker's aggregate
 and per-plugin scores. `/admin/stats` exposes active policy/scorer weights
 and `state_backend`; `/admin/workers` and Prometheus worker gauges read the

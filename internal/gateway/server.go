@@ -196,16 +196,16 @@ func New(cfg *config.Config, log *slog.Logger, version string) (*Server, error) 
 		log.Info("model configured", "model", mc.Name, "mode", mc.Mode, "pd_handshake", mc.PD.Handshake)
 		met.ModelInfo.WithLabelValues(mc.Name, mc.Mode, mc.PD.Handshake).Set(1)
 		var err error
-		if rt.Prefill, err = build(registry.RolePrefill, mc.Routing.Prefill); err != nil {
+		if rt.Prefill, err = build(registry.RolePrefill, mc.Routing.Policy(registry.RolePrefill)); err != nil {
 			return nil, err
 		}
-		if rt.Decode, err = build(registry.RoleDecode, mc.Routing.Decode); err != nil {
+		if rt.Decode, err = build(registry.RoleDecode, mc.Routing.Policy(registry.RoleDecode)); err != nil {
 			return nil, err
 		}
-		if rt.Encode, err = build(registry.RoleEncode, defaultPolicy(mc.Routing.Encode, "load")); err != nil {
+		if rt.Encode, err = build(registry.RoleEncode, mc.Routing.Policy(registry.RoleEncode)); err != nil {
 			return nil, err
 		}
-		if rt.Unified, err = build(registry.RoleUnified, mc.Routing.Unified); err != nil {
+		if rt.Unified, err = build(registry.RoleUnified, mc.Routing.Policy(registry.RoleUnified)); err != nil {
 			return nil, err
 		}
 		queue, err := s.qosBackend.NewQueue(context.Background(), mc.Name, qos.QueueConfig{
@@ -290,13 +290,6 @@ func (s *Server) Close() {
 			_ = s.reg.Store().Close()
 		}
 	})
-}
-
-func defaultPolicy(pc scheduler.PolicyConfig, name string) scheduler.PolicyConfig {
-	if pc.Name == "" && pc.Scorers == nil {
-		pc.Name = name
-	}
-	return pc
 }
 
 // Handler returns the HTTP handler.

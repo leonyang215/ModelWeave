@@ -14,6 +14,7 @@ import (
 	"github.com/leonyang215/ModelWeave/internal/config"
 	"github.com/leonyang215/ModelWeave/internal/gateway"
 	"github.com/leonyang215/ModelWeave/internal/obs"
+	"github.com/leonyang215/ModelWeave/internal/scheduler"
 )
 
 var version = "dev"
@@ -21,6 +22,7 @@ var version = "dev"
 func main() {
 	cfgPath := flag.String("config", envOr("MW_GATEWAY_CONFIG", "configs/gateway.yaml"), "path of the gateway YAML config")
 	showVersion := flag.Bool("version", false, "print the version and exit")
+	checkConfig := flag.Bool("check-config", false, "validate configuration and scheduling plugins without connecting to backends")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println(version)
@@ -30,6 +32,10 @@ func main() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "modelweave-gateway: %v\n", err)
 		os.Exit(1)
+	}
+	if *checkConfig {
+		fmt.Printf("configuration valid: %d models, %d scoring plugins\n", len(cfg.Models), len(scheduler.RegisteredScorers()))
+		return
 	}
 	log := obs.NewLogger(cfg.Server.LogLevel, cfg.Server.LogFormat)
 	srv, err := gateway.New(cfg, log, version)

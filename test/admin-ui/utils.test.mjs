@@ -10,6 +10,8 @@ import {
   filterModels,
   kvRatio,
   mutationSpec,
+  filterPlugins,
+  pluginExample,
 } from "../../internal/gateway/web/utils.mjs";
 
 test("all untrusted HTML characters are escaped, including attribute quotes", () => {
@@ -132,4 +134,46 @@ test("invalid operations, long IDs and blank reasons cannot be submitted", () =>
     mutationSpec("block", "w0", "字".repeat(512)).body.reason.length,
     512,
   );
+});
+
+test("plugin catalog search includes directory and documented parameter names", () => {
+  const plugins = [
+    {
+      name: "label",
+      description: "Soft preference",
+      source: "plugins/scheduling/label",
+      parameters: [{ name: "key" }, { name: "value" }],
+    },
+    {
+      name: "load",
+      description: "Capacity",
+      source: "plugins/scheduling/load",
+      parameters: [],
+    },
+  ];
+  for (const query of [" LABEL ", "value", "scheduling/label", "soft"]) {
+    assert.deepEqual(
+      filterPlugins(plugins, query).map((p) => p.name),
+      ["label"],
+    );
+  }
+  assert.equal(filterPlugins(plugins, "").length, 2);
+  assert.equal(filterPlugins(plugins, "unknown").length, 0);
+});
+
+test("plugin YAML templates use explicit weights and safe quoted identifiers", () => {
+  const label = pluginExample({
+    name: "label",
+    parameters: [{ name: "key" }, { name: "value" }],
+  });
+  assert.match(label, /routing:\n      default:\n        policy: weighted/);
+  assert.match(label, /weight: 2/);
+  assert.match(label, /"key": "zone"/);
+  assert.match(label, /"value": "west"/);
+  assert.equal(
+    (pluginExample({ name: "load" }).match(/name: "load"/g) || []).length,
+    1,
+  );
+  const strange = 'custom"\n<script>';
+  assert.ok(pluginExample({ name: strange }).includes(JSON.stringify(strange)));
 });
