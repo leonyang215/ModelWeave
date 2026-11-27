@@ -64,6 +64,12 @@ type Store interface {
 	SetState(ctx context.Context, ref Ref, st EngineState, at time.Time, revision ...int64) error
 	// SetDrain sets the operator's or the engine's drain flag.
 	SetDrain(ctx context.Context, ref Ref, kind DrainKind, on bool) error
+	// Block and Unblock manage an operator denylist keyed by instance ID,
+	// independently of registrations. Heartbeats, removal and expiry cannot
+	// clear it. Blocking fences any not-yet-committed reservations.
+	Block(ctx context.Context, id, reason string, now time.Time) (Block, error)
+	Unblock(ctx context.Context, id string) error
+	Blocks(ctx context.Context) ([]Block, error)
 	// Reserve accounts a claim on the instance if its reservations, as the
 	// store sees them now, are within lim and its admission revision is
 	// still lim.Revision; otherwise it fails with ErrConflict (or ErrGone).
@@ -105,6 +111,14 @@ type Ref struct {
 type Beat struct {
 	State    *EngineState // nil: the heartbeat carries no report
 	Draining bool
+}
+
+// Block excludes an instance ID from routing until explicitly unblocked.
+// BlockedAtMS uses the store's clock (Redis TIME for a shared store).
+type Block struct {
+	ID          string `json:"id"`
+	Reason      string `json:"reason"`
+	BlockedAtMS int64  `json:"blocked_at_ms"`
 }
 
 // UpsertResult is the outcome of Store.Upsert.
@@ -155,6 +169,7 @@ type Record struct {
 	UnhealthyTill time.Time
 	AdminDrain    bool
 	EngineDrain   bool
+	Block         *Block
 
 	// Reservations of every live gateway sharing the store.
 	Inflight   int64

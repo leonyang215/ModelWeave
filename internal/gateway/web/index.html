@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <meta name="description" content="ModelWeave 网关运维控制台" />
+    <title>ModelWeave · 网关控制台</title>
+    <link rel="icon" href="/admin/assets/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/admin/assets/styles.css" />
+    <script type="module" src="/admin/assets/app.mjs"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">跳转到内容</a>
+    <aside class="sidebar" aria-label="主导航">
+      <a class="brand" href="#overview" aria-label="ModelWeave 首页">
+        <svg
+          class="brand-mark"
+          width="36"
+          height="36"
+          viewBox="0 0 36 36"
+          fill="none"
+          aria-hidden="true"
+        >
+          <rect width="36" height="36" rx="10" fill="#99e3bc" />
+          <path
+            d="m8 12 6 13 4-9 4 9 6-13M8 24l6-13 4 9 4-9 6 13"
+            stroke="#15392e"
+            stroke-width="2"
+            stroke-linejoin="round"
+          />
+        </svg>
+        <span>ModelWeave<small>GATEWAY CONSOLE</small></span>
+      </a>
+      <div class="nav-label">工作空间 / OPERATIONS</div>
+      <nav id="navigation">
+        <a href="#overview" data-page="overview"
+          ><span class="nav-icon" aria-hidden="true">◫</span>运行概览</a
+        >
+        <a href="#models" data-page="models"
+          ><span class="nav-icon" aria-hidden="true">▦</span>模型目录<span
+            id="nav-models"
+            class="nav-count"
+            >—</span
+          ></a
+        >
+        <a href="#workers" data-page="workers"
+          ><span class="nav-icon" aria-hidden="true">▤</span>推理实例<span
+            id="nav-workers"
+            class="nav-count"
+            >—</span
+          ></a
+        >
+        <a href="#blacklist" data-page="blacklist"
+          ><span class="nav-icon" aria-hidden="true">⊘</span>实例黑名单<span
+            id="nav-blocks"
+            class="nav-count"
+            >—</span
+          ></a
+        >
+        <a href="#tenants" data-page="tenants"
+          ><span class="nav-icon" aria-hidden="true">◎</span>租户配额</a
+        >
+      </nav>
+      <div class="sidebar-note">
+        <span class="tiny-label">CONTROL PLANE</span>
+        <p>让每一个请求，<br />抵达合适的模型实例。</p>
+        <span class="protocol-tag">mwip / gRPC</span>
+      </div>
+      <div class="sidebar-footer">
+        <span id="backend-label">等待连接</span
+        ><span id="version-label">ModelWeave</span>
+      </div>
+    </aside>
+
+    <main id="main" tabindex="-1">
+      <header class="topbar">
+        <div class="breadcrumb">
+          工作空间 <span>/</span> <strong>网关管理</strong>
+        </div>
+        <div class="connection">
+          <span id="connection-dot" class="status-dot muted-dot"></span
+          ><span id="connection-label" role="status">正在连接</span
+          ><button id="connection-button" class="button ghost small">
+            连接设置
+          </button>
+        </div>
+      </header>
+      <section class="page-header">
+        <div>
+          <div class="eyebrow">MODELWEAVE / OPERATIONS</div>
+          <h1 id="page-title">运行概览</h1>
+          <p id="page-description">网关、模型与推理实例的实时运行视图。</p>
+        </div>
+        <div class="refresh-controls">
+          <label class="auto-refresh"
+            ><input id="auto-refresh" type="checkbox" checked /> 自动刷新 · 5
+            秒</label
+          ><button id="refresh-button" class="button secondary" disabled>
+            <span aria-hidden="true">↻</span> 刷新
+          </button>
+        </div>
+      </section>
+      <div id="error-banner" class="banner error" role="alert" hidden></div>
+      <div id="security-banner" class="banner warning" hidden>
+        管理接口尚未启用令牌认证。请勿直接暴露到公网；生产环境请设置
+        server.admin_token，并使用 HTTPS。
+      </div>
+      <div id="content" aria-live="polite" aria-busy="true">
+        <div class="empty-state panel">
+          <div class="empty-symbol" aria-hidden="true">◫</div>
+          <h2>正在读取网关状态</h2>
+          <p>连接到当前网关的管理 API…</p>
+        </div>
+      </div>
+      <footer class="page-footer">
+        <span>ModelWeave · 缓存与负载感知的推理网关</span
+        ><span id="updated-at">尚未同步</span>
+      </footer>
+    </main>
+
+    <dialog
+      id="connection-dialog"
+      class="modal auth-modal"
+      aria-labelledby="connection-title"
+    >
+      <form id="connection-form">
+        <div class="dialog-eyebrow">SECURE CONNECTION</div>
+        <h2 id="connection-title">连接网关控制台</h2>
+        <p class="dialog-description">
+          使用管理令牌访问当前网关。令牌仅保存在此页面内存中，刷新页面后需要重新输入。
+        </p>
+        <label class="field-label" for="admin-token">管理令牌</label
+        ><input
+          id="admin-token"
+          type="password"
+          placeholder="输入 server.admin_token"
+          autocomplete="off"
+          spellcheck="false"
+          maxlength="4096"
+        />
+        <p class="field-hint">
+          通过 X-ModelWeave-Token 请求头发送；未单独配置时使用
+          control_token。无令牌的本地环境可留空。
+        </p>
+        <p id="connection-error" class="form-error" role="alert" hidden></p>
+        <div class="dialog-actions">
+          <button id="disconnect-button" class="button ghost" type="button">
+            断开并清除</button
+          ><button class="button primary" type="submit">
+            连接网关 <span aria-hidden="true">→</span>
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="action-dialog" class="modal" aria-labelledby="action-title">
+      <form id="action-form">
+        <fieldset id="action-fields">
+          <div class="dialog-eyebrow">INSTANCE OPERATION</div>
+          <h2 id="action-title">实例操作</h2>
+          <p id="action-description" class="dialog-description"></p>
+          <label class="field-label" for="action-worker">实例 ID</label
+          ><input
+            id="action-worker"
+            required
+            maxlength="256"
+            spellcheck="false"
+            autocomplete="off"
+          />
+          <div id="reason-field">
+            <label class="field-label" for="action-reason"
+              >拉黑原因 <span class="required">*</span></label
+            ><textarea
+              id="action-reason"
+              rows="3"
+              maxlength="512"
+              placeholder="例如：持续出现推理错误，等待排查"
+            ></textarea>
+            <p class="field-hint">
+              最多 512 个字符。黑名单不会被心跳、注销或重新注册自动清除。
+            </p>
+          </div>
+          <div id="action-notice" class="operation-notice"></div>
+          <p id="action-error" class="form-error" role="alert" hidden></p>
+          <div class="dialog-actions">
+            <button id="cancel-action" class="button secondary" type="button">
+              取消</button
+            ><button id="confirm-action" class="button danger" type="submit">
+              确认操作
+            </button>
+          </div>
+        </fieldset>
+      </form>
+    </dialog>
+
+    <dialog
+      id="details-dialog"
+      class="modal detail-modal"
+      aria-labelledby="details-title"
+    >
+      <div class="detail-heading">
+        <div>
+          <div class="dialog-eyebrow">RESOURCE DETAILS</div>
+          <h2 id="details-title">资源详情</h2>
+        </div>
+        <button
+          id="close-details"
+          class="button secondary small"
+          aria-label="关闭详情"
+        >
+          关闭 ×
+        </button>
+      </div>
+      <div id="details-content"></div>
+    </dialog>
+    <div id="toast" class="toast" role="status" hidden></div>
+    <noscript
+      ><div class="noscript">
+        管理控制台需要启用 JavaScript。管理 API 仍可通过
+        /admin/models、/admin/workers 和 /admin/blacklist 使用。
+      </div></noscript
+    >
+  </body>
+</html>

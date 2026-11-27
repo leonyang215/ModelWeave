@@ -1,0 +1,11 @@
+{
+  "name": "modelweave-admin-ui-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test utils.test.mjs"
+  },
+  "devDependencies": {
+    "playwright": "1.65.1"
+  }
+}

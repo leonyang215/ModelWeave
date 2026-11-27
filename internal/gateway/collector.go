@@ -16,7 +16,8 @@ import (
 var workerLabels = []string{"worker", "model", "role"}
 
 var (
-	descUp       = prometheus.NewDesc("modelweave_worker_up", "1 when the worker is healthy and not draining.", workerLabels, nil)
+	descUp       = prometheus.NewDesc("modelweave_worker_up", "1 when the worker is healthy, not draining and not blocked.", workerLabels, nil)
+	descBlocked  = prometheus.NewDesc("modelweave_worker_blocked", "1 when an operator has blocked the instance ID.", workerLabels, nil)
 	descInflight = prometheus.NewDesc("modelweave_worker_inflight_requests", "Requests the gateway has assigned to the worker.", workerLabels, nil)
 	descReserved = prometheus.NewDesc("modelweave_worker_reserved_kv_tokens", "KV tokens reserved by the gateway on the worker.", workerLabels, nil)
 	descKVUsed   = prometheus.NewDesc("modelweave_worker_kv_used_tokens", "Effective KV usage (reported usage merged with unreported reservations).", workerLabels, nil)
@@ -37,7 +38,7 @@ type workerCollector struct {
 }
 
 func (c *workerCollector) Describe(ch chan<- *prometheus.Desc) {
-	for _, d := range []*prometheus.Desc{descUp, descInflight, descReserved, descKVUsed, descKVCap, descKVUtil, descPrefill, descRunning, descWaiting, descAge, descDone, descErrs} {
+	for _, d := range []*prometheus.Desc{descUp, descBlocked, descInflight, descReserved, descKVUsed, descKVCap, descKVUtil, descPrefill, descRunning, descWaiting, descAge, descDone, descErrs} {
 		ch <- d
 	}
 }
@@ -56,13 +57,18 @@ func (c *workerCollector) Collect(ch chan<- prometheus.Metric) {
 		}
 		lv := []string{s.Spec.ID, s.Spec.Model, string(s.Spec.Role)}
 		up := 0.0
-		if s.Healthy && !s.Draining {
+		if s.Healthy && !s.Draining && !s.Blocked {
 			up = 1
 		}
 		gauge := func(d *prometheus.Desc, v float64) {
 			ch <- prometheus.MustNewConstMetric(d, prometheus.GaugeValue, v, lv...)
 		}
 		gauge(descUp, up)
+		blocked := 0.0
+		if s.Blocked {
+			blocked = 1
+		}
+		gauge(descBlocked, blocked)
 		gauge(descInflight, float64(s.Inflight))
 		gauge(descReserved, float64(s.ReservedKV))
 		gauge(descKVUsed, float64(s.EffectiveKVUsed))

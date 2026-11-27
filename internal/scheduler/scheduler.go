@@ -199,7 +199,7 @@ func (s *Scheduler) Schedule(ctx context.Context, req *Request) (*Decision, erro
 				continue
 			}
 			snap := snaps[i]
-			if snap.Gone || snap.Spec.Model != req.Model || snap.Spec.Role != req.Role || !snap.Healthy || snap.Draining {
+			if snap.Gone || snap.Spec.Model != req.Model || snap.Spec.Role != req.Role || !snap.Healthy || snap.Draining || snap.Blocked {
 				continue
 			}
 			if req.RequireNormal && !snap.Spec.ServesNormal() {

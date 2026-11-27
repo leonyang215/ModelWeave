@@ -186,17 +186,20 @@ type Snapshot struct {
 	Gone         bool
 	Revision     int64
 	AdminDrained bool
+	Blocked      bool
+	Block        *Block
 
-	HasState   bool
-	State      EngineState
-	StateAge   time.Duration
-	Healthy    bool
-	Draining   bool
-	LastSeen   time.Time
-	Failures   int
-	Inflight   int64
-	PrefillTok int64 // gateway-tracked uncached prefill tokens in flight
-	ReservedKV int64 // gateway-tracked KV reservation
+	HasState      bool
+	StateReported bool
+	State         EngineState
+	StateAge      time.Duration
+	Healthy       bool
+	Draining      bool
+	LastSeen      time.Time
+	Failures      int
+	Inflight      int64
+	PrefillTok    int64 // gateway-tracked uncached prefill tokens in flight
+	ReservedKV    int64 // gateway-tracked KV reservation
 	// EffectiveKVUsed merges the reported usage with reservations the
 	// report does not reflect yet (and with all live gateways' reservations).
 	EffectiveKVUsed  int64
@@ -291,6 +294,8 @@ func (w *Worker) snapshot(rec Record, now time.Time, staleAfter time.Duration) S
 		Failures:     rec.Failures,
 		Draining:     rec.AdminDrain || rec.EngineDrain,
 		AdminDrained: rec.AdminDrain,
+		Blocked:      rec.Block != nil,
+		Block:        rec.Block,
 	}
 	if rec.Gone {
 		s.Spec = w.Spec()
@@ -303,10 +308,13 @@ func (w *Worker) snapshot(rec Record, now time.Time, staleAfter time.Duration) S
 		// and cooldown using the store's clock.
 		s.LastSeen = now.Add(-clock.Sub(rec.LastSeen))
 	}
+	if rec.HasState {
+		s.StateReported = true
+		s.StateAge = max(clock.Sub(rec.StateAt), 0)
+	}
 	if rec.HasState && (staleAfter <= 0 || clock.Sub(rec.StateAt) <= staleAfter) {
 		s.HasState = true
 		s.State = rec.State
-		s.StateAge = max(clock.Sub(rec.StateAt), 0)
 		s.Draining = s.Draining || rec.State.Draining
 	}
 	s.Healthy = !clock.Before(rec.UnhealthyTill)

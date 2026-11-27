@@ -6,6 +6,7 @@ server:
   grpc_listen: "${MW_REGISTRY_LISTEN}"
   expose_routing_headers: true
   control_token: "${MW_CONTROL_TOKEN}"
+  admin_token: ""                    # set ${MW_ADMIN_TOKEN} to isolate admin from engine credentials
 tokenizer:
   endpoints: ["http://127.0.0.1:8090"]
 auth: {enabled: true}
@@ -22,7 +23,7 @@ state:
   sync_interval: 250ms
   redis:
     url: "${MW_REDIS_URL}"
-    namespace: modelweave-demo-v2
+    namespace: modelweave-demo-v3
     timeout: 1s
     lease_ttl: 15s
 discovery: {heartbeat_ttl: 15s}

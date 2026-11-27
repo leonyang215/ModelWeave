@@ -4,9 +4,10 @@ CARGO   ?= cargo
 COMPOSE ?= docker compose -f deploy/compose/docker-compose.yaml
 PROTOC  ?= protoc
 PYTHON  ?= python3
+NODE    ?= node
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
-.PHONY: all build build-go build-tokenizer proto diagrams test test-go test-rust lint images up down e2e e2e-host clean
+.PHONY: all build build-go build-tokenizer proto diagrams test test-go test-rust test-admin-ui test-admin-browser lint images up down e2e e2e-host clean
 
 all: build
 
@@ -28,7 +29,7 @@ proto:
 	  --go-grpc_out=. --go-grpc_opt=module=github.com/leonyang215/ModelWeave \
 	  proto/modelweave/mwip/v1/*.proto
 
-test: test-go test-rust
+test: test-go test-rust test-admin-ui
 
 test-go:
 	$(GO) vet ./...
@@ -36,6 +37,14 @@ test-go:
 
 test-rust:
 	cd tokenizer && $(CARGO) test --locked
+
+# Dependency-free console view/security tests (Node 20+).
+test-admin-ui:
+	$(NODE) --test test/admin-ui/utils.test.mjs
+
+# Optional Chromium tests against an isolated real gateway. Setup: docs/admin.md.
+test-admin-browser:
+	MW_ADMIN_BROWSER=1 $(GO) test -race -count=1 -v -run '^TestAdminBrowser$$' ./internal/gateway
 
 # Editable architecture artwork; generated SVG/PNG are committed.
 diagrams:

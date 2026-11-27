@@ -73,7 +73,8 @@ active scorer names/weights for every model/role.
 
 | Metric | Meaning |
 |---|---|
-| `modelweave_worker_up` | 1 when healthy and not draining |
+| `modelweave_worker_up` | 1 when healthy, not draining and not blocked |
+| `modelweave_worker_blocked` | 1 when the registered instance ID is on the operator blacklist |
 | `modelweave_worker_inflight_requests` | requests the gateway has assigned |
 | `modelweave_worker_reserved_kv_tokens` | KV reserved by the gateway |
 | `modelweave_worker_kv_used_tokens`, `modelweave_worker_kv_capacity_tokens`, `modelweave_worker_kv_utilization` | effective KV usage (reports merged with unreported reservations) |
@@ -139,6 +140,11 @@ startup (`model configured`), the mwip Registry address (`mwip_registry`),
 instances joining and leaving the registry (`worker added`, `worker removed`,
 `instance expired: no heartbeat`), ejections, retries and fallbacks; all
 carry `request_id` or `worker` where relevant.
+
+Successful [admin operations](admin.md) write `admin action` events with
+`action` (`block`, `unblock`, `set_drain`), `worker`, `remote_addr` and the
+reason/drain value where relevant. Tokens are never logged. The shared-token
+API has no individual operator identity; `remote_addr` is the socket peer.
 
 The tokenizer logs (tracing JSON) one `model loaded` line per registered
 model at startup (name, aliases, family, context window, parsers,

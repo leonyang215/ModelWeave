@@ -509,3 +509,13 @@ On error or timeout the gateway falls back to its approximate index (local
 in memory mode, shared in Redis mode).
 The block hashes are those of §4.3 (media positions already hold their pad
 values), so the service needs no knowledge of media or prompt formats.
+
+---
+
+## 5. HTTP administration
+
+The embedded console is at `/admin/`. Authenticated APIs expose model/instance
+inventory, statistics, drain/resume and an instance-ID blacklist that survives
+re-registration. HTTP admin authentication can be separated from the engine
+Registry with `server.admin_token`; see [admin API, security and lifecycle](admin.md)
+for the full contract and examples.

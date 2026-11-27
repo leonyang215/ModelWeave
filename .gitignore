@@ -5,3 +5,4 @@ tokenizer/target/
 deploy/compose/data/
 examples/python-engine/gen/
 __pycache__/
+test/admin-ui/node_modules/

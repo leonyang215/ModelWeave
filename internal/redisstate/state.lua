@@ -3,6 +3,9 @@
 local op, root, owner, id = ARGV[1], ARGV[2], ARGV[3], ARGV[4]
 local members, version, epochs, leases, liveness = KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5]
 local data, claims = KEYS[6], KEYS[7]
+-- Deliberately separate from worker records: deregistration/expiry must not
+-- undo an operator block. All keys remain in this namespace's hash slot.
+local blacklist = root..'blacklist'
 local t = redis.call('TIME')
 local now = tonumber(t[1])*1000 + math.floor(tonumber(t[2])/1000)
 local function number(key, field)
@@ -91,6 +94,20 @@ elseif op == 'members' then
         for i=1,#entries do out[#out+1] = entries[i] end
     end
     return out
+elseif op == 'blocks' then
+    return redis.call('HVALS', blacklist)
+elseif op == 'block' then
+    local old = redis.call('HGET', blacklist, id)
+    if old and cjson.decode(old).reason == ARGV[5] then return old end
+    local b = cjson.encode({id=id,reason=ARGV[5],blocked_at_ms=now})
+    redis.call('HSET', blacklist, id, b)
+    if redis.call('HEXISTS', data, 'epoch') == 1 then redis.call('HINCRBY', data, 'revision', 1) end
+    return b
+elseif op == 'unblock' then
+    if redis.call('HDEL', blacklist, id) == 1 and redis.call('HEXISTS', data, 'epoch') == 1 then
+        redis.call('HINCRBY', data, 'revision', 1)
+    end
+    return 1
 elseif op == 'upsert' then
     local spec, source = ARGV[5], ARGV[6]
     local epoch = redis.call('HGET', data, 'epoch')
@@ -145,6 +162,7 @@ elseif op == 'load' then
     if not current() then return cjson.encode({gone=true}) end
     local a = totals()
     local state = redis.call('HGET', data, 'state')
+    local block = redis.call('HGET', blacklist, id)
     return cjson.encode({
         entry=cjson.decode(redis.call('HGET', data, 'entry')), now=now,
         last_seen=number(data,'last_seen'), state_at=number(data,'state_at'),
@@ -152,6 +170,7 @@ elseif op == 'load' then
         state_ver=number(data,'state_ver'), revision=number(data,'revision'),
         failures=number(data,'failures'), unhealthy_till=number(data,'unhealthy_till'),
         admin_drain=number(data,'admin_drain') == 1, engine_drain=number(data,'engine_drain') == 1,
+        block=block and cjson.decode(block) or cjson.null,
         inflight=a[1], reserved_kv=a[2], prefill=a[3], pending_kv=a[4]
     })
 elseif op == 'state' then
@@ -172,6 +191,7 @@ elseif op == 'reserve' then
     if ARGV[14] ~= '' and (redis.call('HGET',KEYS[8],'turn') ~= ARGV[14] or redis.call('HGET',KEYS[8],'token') ~= ARGV[15]) then return -4 end
     if not current() then return -1 end
     if redis.call('HEXISTS', claims, ARGV[6]) == 1 then return 1 end
+    if redis.call('HEXISTS', blacklist, id) == 1 then return -2 end
     local revision = tonumber(ARGV[9])
     if revision >= 0 and number(data,'revision') ~= revision then return -2 end
     local a = totals()

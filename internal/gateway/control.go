@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"sort"
 	"time"
@@ -13,16 +15,18 @@ import (
 	"github.com/leonyang215/ModelWeave/internal/registry"
 )
 
-// control guards the admin endpoints with the optional shared token
-// (constant-time comparison). The engine control plane is the gRPC
-// Registry (registry_service.go).
+// control guards admin APIs, not the public console shell. It does not
+// accept tenant API keys or put the admin token in a URL/cookie.
 func (s *Server) control(h http.HandlerFunc) http.HandlerFunc {
-	token := s.cfg.Server.ControlToken
-	if token == "" {
-		return h
-	}
+	token := s.adminToken()
+	var origin http.CrossOriginProtection
 	return func(w http.ResponseWriter, r *http.Request) {
-		if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-ModelWeave-Token")), []byte(token)) != 1 {
+		adminHeaders(w)
+		if err := origin.Check(r); err != nil {
+			controlError(w, http.StatusForbidden, "cross-origin admin mutation is not allowed")
+			return
+		}
+		if token != "" && subtle.ConstantTimeCompare([]byte(r.Header.Get("X-ModelWeave-Token")), []byte(token)) != 1 {
 			writeJSON(w, http.StatusUnauthorized, mwip.ErrorBody{Type: "error", Code: "unauthorized", Message: "missing or invalid X-ModelWeave-Token"})
 			return
 		}
@@ -59,15 +63,22 @@ func (s *Server) applyKVEvents(worker *registry.Worker, ev *mwip.KVEvents) error
 }
 
 type workerView struct {
-	ID           string        `json:"id"`
-	Model        string        `json:"model"`
-	Role         registry.Role `json:"role"`
-	Target       string        `json:"target"`           // mwip target
-	Normal       bool          `json:"normal,omitempty"` // runs normal (non-PD) requests
-	Source       string        `json:"source"`           // heartbeat or static
-	Healthy      bool          `json:"healthy"`
-	Draining     bool          `json:"draining"`                // takes no new requests
-	AdminDrained bool          `json:"admin_drained,omitempty"` // drained through the admin API
+	ID            string            `json:"id"`
+	Model         string            `json:"model"`
+	Role          registry.Role     `json:"role"`
+	Target        string            `json:"target"`           // mwip target
+	Normal        bool              `json:"normal,omitempty"` // runs normal (non-PD) requests
+	Source        string            `json:"source"`           // heartbeat or static
+	Healthy       bool              `json:"healthy"`
+	Draining      bool              `json:"draining"`                // takes no new requests
+	AdminDrained  bool              `json:"admin_drained,omitempty"` // drained through the admin API
+	Blocked       bool              `json:"blocked"`
+	Block         *registry.Block   `json:"block,omitempty"`
+	Labels        map[string]string `json:"labels,omitempty"`
+	EngineID      string            `json:"engine_id,omitempty"`
+	BootstrapAddr string            `json:"bootstrap_addr,omitempty"`
+	MaxRunning    int               `json:"max_running_requests"`
+	MaxPrefill    int64             `json:"max_prefill_queue_tokens"`
 	// HeartbeatAgeMS is the time since the last heartbeat; the instance
 	// expires when it passes the heartbeat TTL (heartbeat instances).
 	HeartbeatAgeMS  int64                 `json:"heartbeat_age_ms,omitempty"`
@@ -78,30 +89,78 @@ type workerView struct {
 	KVCapacity      int64                 `json:"kv_capacity_tokens"`
 	StateAgeMS      int64                 `json:"state_age_ms,omitempty"`
 	State           *registry.EngineState `json:"state,omitempty"`
+	StateStatus     string                `json:"state_status"` // fresh | stale | unknown
 	Completed       int64                 `json:"completed"`
 	Errors          int64                 `json:"errors"`
 	CachedBlocks    int                   `json:"index_blocks,omitempty"`
 }
 
 func (s *Server) handleWorkers(w http.ResponseWriter, r *http.Request) {
-	if err := s.reg.Sync(r.Context()); err != nil {
-		controlError(w, http.StatusServiceUnavailable, "state store unavailable")
+	out, err := s.workerViews(r.Context())
+	if err != nil {
+		controlError(w, http.StatusServiceUnavailable, "admin state unavailable")
 		return
+	}
+	model := r.URL.Query().Get("model")
+	if model != "" {
+		m := s.byName[model]
+		if m == nil {
+			controlError(w, http.StatusNotFound, "unknown model")
+			return
+		}
+		model = m.cfg.Name
+	}
+	role := r.URL.Query().Get("role")
+	if role != "" {
+		if _, err := registry.ParseRole(role); err != nil {
+			controlError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	status := r.URL.Query().Get("status")
+	switch status {
+	case "", "active", "blocked", "draining", "unhealthy":
+	default:
+		controlError(w, http.StatusBadRequest, "status must be active, blocked, draining or unhealthy")
+		return
+	}
+	filtered := make([]workerView, 0, len(out))
+	for _, v := range out {
+		if (model == "" || v.Model == model) && (role == "" || string(v.Role) == role) && (status == "" || v.status() == status) {
+			filtered = append(filtered, v)
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"workers": filtered})
+}
+
+func (v workerView) status() string {
+	switch {
+	case v.Blocked:
+		return "blocked"
+	case v.Draining:
+		return "draining"
+	case !v.Healthy:
+		return "unhealthy"
+	default:
+		return "active"
+	}
+}
+
+func (s *Server) workerViews(ctx context.Context) ([]workerView, error) {
+	if err := s.reg.Sync(ctx); err != nil {
+		return nil, err
 	}
 	now := time.Now()
-	var perWorker map[string]int
 	ws := s.reg.All()
-	_, perWorker, err := indexStats(r.Context(), s.index, ws)
+	_, perWorker, err := indexStats(ctx, s.index, ws)
 	if err != nil {
-		controlError(w, http.StatusServiceUnavailable, "prefix index unavailable")
-		return
+		return nil, fmt.Errorf("prefix index unavailable: %w", err)
 	}
-	snaps, err := s.reg.Snapshots(r.Context(), ws, now, s.cfg.EngineState.StaleAfter.D())
+	snaps, err := s.reg.Snapshots(ctx, ws, now, s.cfg.EngineState.StaleAfter.D())
 	if err != nil {
-		controlError(w, http.StatusServiceUnavailable, "state store unavailable")
-		return
+		return nil, err
 	}
-	var out []workerView
+	out := make([]workerView, 0, len(ws))
 	for i, wk := range ws {
 		snap := snaps[i]
 		if snap.Gone {
@@ -111,23 +170,38 @@ func (s *Server) handleWorkers(w http.ResponseWriter, r *http.Request) {
 		v := workerView{
 			ID: snap.Spec.ID, Model: snap.Spec.Model, Role: snap.Spec.Role, Target: snap.Spec.Target, Normal: snap.Spec.ServesNormal(),
 			Source: wk.Source(), Healthy: snap.Healthy, Draining: snap.Draining, AdminDrained: snap.AdminDrained, Inflight: snap.Inflight,
+			Blocked: snap.Blocked, Block: snap.Block, Labels: snap.Spec.Labels,
+			EngineID: snap.Spec.EngineID, BootstrapAddr: snap.Spec.BootstrapAddr, MaxRunning: snap.MaxRunning, MaxPrefill: snap.MaxPrefillTokens,
 			ReservedKV: snap.ReservedKV, InflightPrefill: snap.PrefillTok, EffectiveKVUsed: snap.EffectiveKVUsed,
 			KVCapacity: snap.KVCapacity, Completed: done, Errors: errs, CachedBlocks: perWorker[wk.CacheKey()],
+			StateStatus: "unknown",
 		}
 		if wk.Source() == "heartbeat" {
 			v.HeartbeatAgeMS = max(now.Sub(snap.LastSeen).Milliseconds(), 1)
 		}
+		if snap.StateReported {
+			v.StateStatus = "stale"
+			v.StateAgeMS = snap.StateAge.Milliseconds()
+		}
 		if snap.HasState {
 			st := snap.State
 			v.State = &st
-			v.StateAgeMS = snap.StateAge.Milliseconds()
+			v.StateStatus = "fresh"
 		}
 		out = append(out, v)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"workers": out})
+	return out, nil
 }
 
 func (s *Server) handleDrain(w http.ResponseWriter, r *http.Request) {
+	s.setDraining(w, r, r.URL.Query().Get("undo") == "")
+}
+
+func (s *Server) handleResume(w http.ResponseWriter, r *http.Request) {
+	s.setDraining(w, r, false)
+}
+
+func (s *Server) setDraining(w http.ResponseWriter, r *http.Request, drain bool) {
 	if err := s.reg.Sync(r.Context()); err != nil {
 		controlError(w, http.StatusServiceUnavailable, "state store unavailable")
 		return
@@ -137,11 +211,18 @@ func (s *Server) handleDrain(w http.ResponseWriter, r *http.Request) {
 		controlError(w, http.StatusNotFound, "unknown worker")
 		return
 	}
-	drain := r.URL.Query().Get("undo") == ""
 	if err := wk.SetDrainingContext(r.Context(), drain); err != nil {
+		if errors.Is(err, registry.ErrGone) {
+			controlError(w, http.StatusConflict, "instance registration changed; refresh and retry")
+			return
+		}
 		controlError(w, http.StatusServiceUnavailable, "state store unavailable")
 		return
 	}
+	if m := s.models[wk.Spec().Model]; m != nil {
+		m.queue.Notify()
+	}
+	s.log.Info("admin action", "action", "set_drain", "worker", wk.ID(), "draining", drain, "remote_addr", r.RemoteAddr)
 	writeJSON(w, http.StatusOK, map[string]any{"worker": wk.ID(), "draining": drain})
 }
 
@@ -193,6 +274,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"version": s.version, "models": models, "kv_index": idx, "tenants": tenants, "state_backend": s.reg.Store().Kind(), "qos_backend": s.qosBackend.Kind(),
+		"ready": s.ready.Load(), "uptime_seconds": int64(time.Since(s.startedAt).Seconds()), "admin_auth_required": s.adminToken() != "",
 	})
 }
 

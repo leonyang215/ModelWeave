@@ -15,6 +15,7 @@
 - **单机与分布式。** `state.backend` 统一切换内存或 Redis：注册表、实例状态、容量预留、缓存、租户 RPM/TPM/并发额度和按模型的优先级公平队列。
 - **统一引擎协议。** 引擎接收 token 和生成选项，自行反分词、解析输出；网关不适配各引擎的原生 API。
 - **可观测、可验证。** Prometheus、结构化访问日志，以及无需 GPU 的 mock 引擎与集成测试。
+- **内置管理平台。** 查询模型、实例、负载/队列和租户配额，支持摘流/恢复、按实例 ID 拉黑/解除拉黑及令牌保护的管理 API。
 
 ## 架构
 
@@ -47,6 +48,10 @@ curl -s localhost:38080/v1/chat/completions \
 网关：`:38080` · Registry：`:38082` · Tokenizer：`:38090`。
 模型、租户、端口和更多请求示例见[本地栈说明](deploy/compose/README.md)。
 
+打开 **http://localhost:38080/admin/** 即可使用内嵌管理平台（本地栈令牌：
+`local-control-token`），无需构建前端或部署额外的 Web 服务。
+参见[管理操作、安全与 API](docs/admin.md)。
+
 ## 部署模式
 
 默认 `state.backend: memory`，适用于单个网关。多副本使用同一个 Redis namespace，
@@ -57,7 +62,7 @@ state:
   backend: redis
   redis:
     url: "${MW_REDIS_URL}"
-    namespace: modelweave-v2
+    namespace: modelweave-v3
 ```
 
 [完整配置](configs/gateway.example.yaml) · [Redis 示例](configs/gateway.redis.example.yaml) ·
@@ -73,11 +78,11 @@ state:
 
 ## 开发
 
-需要 Go 1.26+ 和 Rust 1.88+。
+需要 Go 1.26+、Rust 1.88+；管理平台测试另需 Node 20+（构建和运行网关不需要）。
 
 ```sh
 make build      # 网关、tokenizer、mock 引擎
-make test       # Go race 测试 + Rust 测试
+make test       # Go race 测试 + Rust 测试 + 无依赖的前端逻辑测试
 make lint       # gofmt、rustfmt、clippy
 make diagrams   # 重新生成 SVG/PNG；需要 Python 3 和 Graphviz
 ```
@@ -86,6 +91,7 @@ make diagrams   # 重新生成 SVG/PNG；需要 Python 3 和 Graphviz
 
 - [架构](docs/architecture.md)：请求生命周期、执行模式与代码目录
 - [状态与调度](docs/state-and-scheduling.md)：内存/Redis、QoS、插件与权重
+- [管理平台与 API](docs/admin.md)：资源查询、实例隔离、安全和浏览器测试
 - [mwip](docs/mwip.md) · [多模态执行契约](docs/multimodal.md) · [接口协议](docs/protocol.md) · [可观测性](docs/observability.md)
 - [Tokenizer/模型配置](configs/tokenizer.example.toml) · [本地栈](deploy/compose/README.md)
 

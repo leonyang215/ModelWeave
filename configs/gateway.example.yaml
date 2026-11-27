@@ -13,8 +13,10 @@ server:
   expose_routing_headers: true      # X-ModelWeave-Mode / -Decode-Worker / -Prefill-Worker ...
   shutdown_grace: 30s
   grpc_listen: ":8081"              # mwip Registry (gRPC): engine instances register here
-  control_token: ""                 # if set, Registry calls need x-modelweave-token metadata and
-                                    # /admin/* the X-ModelWeave-Token header
+  control_token: ""                 # Registry x-modelweave-token metadata; legacy admin fallback
+  admin_token: ""                   # HTTP admin X-ModelWeave-Token; overrides control_token for admin only
+                                    # production: use distinct secrets via ${MW_ADMIN_TOKEN}, and HTTPS
+  disable_admin_ui: false           # /admin/ console is embedded; API remains when UI is disabled
 
 tokenizer:
   endpoints: ["http://tokenizer:8090"]   # round-robin; each request pins one replica

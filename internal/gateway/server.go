@@ -54,6 +54,7 @@ type Server struct {
 	byName     map[string]*modelRT // name or alias
 	ready      atomic.Bool
 	version    string
+	startedAt  time.Time
 	wg         sync.WaitGroup
 	closeOnce  sync.Once
 }
@@ -85,17 +86,18 @@ func New(cfg *config.Config, log *slog.Logger, version string) (*Server, error) 
 	met := obs.NewMetrics()
 	met.BuildInfo.WithLabelValues(version).Set(1)
 	s := &Server{
-		cfg:     cfg,
-		log:     log,
-		met:     met,
-		reg:     registry.NewWithStore(cfg.Discovery.HeartbeatTTL.D(), store),
-		tok:     tokenizer.New(cfg.Tokenizer.Endpoints, cfg.Tokenizer.Timeout.D()),
-		eng:     engine.New(),
-		keys:    map[string]string{},
-		tenants: map[string]config.Tenant{},
-		models:  map[string]*modelRT{},
-		byName:  map[string]*modelRT{},
-		version: version,
+		cfg:       cfg,
+		log:       log,
+		met:       met,
+		reg:       registry.NewWithStore(cfg.Discovery.HeartbeatTTL.D(), store),
+		tok:       tokenizer.New(cfg.Tokenizer.Endpoints, cfg.Tokenizer.Timeout.D()),
+		eng:       engine.New(),
+		keys:      map[string]string{},
+		tenants:   map[string]config.Tenant{},
+		models:    map[string]*modelRT{},
+		byName:    map[string]*modelRT{},
+		version:   version,
+		startedAt: time.Now(),
 	}
 	constructed := false
 	defer func() {
@@ -261,6 +263,9 @@ func New(cfg *config.Config, log *slog.Logger, version string) (*Server, error) 
 		}
 	}
 	met.Registry.MustRegister(&workerCollector{reg: s.reg, staleAfter: cfg.EngineState.StaleAfter.D()})
+	if s.adminToken() == "" {
+		log.Warn("admin API has no authentication token; restrict network access or set server.admin_token")
+	}
 	s.ready.Store(true)
 	constructed = true
 	return s, nil
@@ -301,9 +306,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/responses", s.handleAPI("responses"))
 	mux.HandleFunc("POST /v1/messages", s.handleAPI("messages"))
 	mux.HandleFunc("GET /v1/models", s.handleModels)
-	mux.HandleFunc("GET /admin/workers", s.control(s.handleWorkers))
-	mux.HandleFunc("POST /admin/workers/{id}/drain", s.control(s.handleDrain))
-	mux.HandleFunc("GET /admin/stats", s.control(s.handleStats))
+	s.mountAdmin(mux)
 	mux.Handle("GET /metrics", promhttp.HandlerFor(s.met.Registry, promhttp.HandlerOpts{}))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok")) })
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
@@ -457,7 +460,7 @@ func (s *Server) updateOverload() {
 			n := 0
 			for _, w := range ws {
 				snap := w.Snapshot(now, stale)
-				if !snap.Healthy {
+				if !snap.Healthy || snap.Draining || snap.Blocked {
 					continue
 				}
 				n++

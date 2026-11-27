@@ -66,9 +66,14 @@ type Server struct {
 	// control plane engine instances register with (default :8081).
 	GRPCListen string `yaml:"grpc_listen"`
 	// ControlToken, when set, is required on the mwip Registry
-	// (x-modelweave-token metadata) and the admin API (/admin/*,
-	// X-ModelWeave-Token header).
+	// (x-modelweave-token metadata). It also protects the admin API unless
+	// AdminToken overrides it (X-ModelWeave-Token HTTP header).
 	ControlToken string `yaml:"control_token"`
+	// AdminToken overrides ControlToken for the HTTP admin API only. Engines
+	// keep using ControlToken. Empty preserves the existing shared-token setup.
+	AdminToken string `yaml:"admin_token"`
+	// DisableAdminUI removes the embedded console, but not the admin API.
+	DisableAdminUI bool `yaml:"disable_admin_ui"`
 }
 
 // Tokenizer configures the tokenizer client.

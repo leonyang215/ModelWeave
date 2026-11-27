@@ -23,6 +23,8 @@ their parsed output as SSE or JSON.
   detokenize and parse their own output. No gateway-side engine API adapters.
 - **Observable and testable.** Prometheus, structured access logs and GPU-free
   mock engines for integration tests.
+- **Built-in admin console.** Models, instances, load/queues and tenant quotas;
+  drain/resume and persistent-by-ID instance isolation through a token-protected API.
 
 ## Architecture
 
@@ -55,6 +57,10 @@ curl -s localhost:38080/v1/chat/completions \
 Gateway: `:38080` · Registry: `:38082` · Tokenizer: `:38090`.
 For models, tenants, ports and more requests, see the [local stack guide](deploy/compose/README.md).
 
+Open **http://localhost:38080/admin/** for the embedded management console
+(local stack token: `local-control-token`). No frontend build or separate web
+server is needed. See [admin operations and security](docs/admin.md).
+
 ## Deployment mode
 
 The default is `state.backend: memory` for one gateway. For replicas, use a
@@ -65,7 +71,7 @@ state:
   backend: redis
   redis:
     url: "${MW_REDIS_URL}"
-    namespace: modelweave-v2
+    namespace: modelweave-v3
 ```
 
 [Full configuration](configs/gateway.example.yaml) · [Redis example](configs/gateway.redis.example.yaml) ·
@@ -82,11 +88,11 @@ Engines built on vLLM, SGLang or another runtime must expose this mwip service.
 
 ## Development
 
-Requires Go 1.26+ and Rust 1.88+.
+Requires Go 1.26+, Rust 1.88+ and Node 20+ for console tests (not for builds/runtime).
 
 ```sh
 make build      # gateway, tokenizer and mock engine
-make test       # Go race tests + Rust tests
+make test       # Go race tests + Rust tests + dependency-free console tests
 make lint       # gofmt, rustfmt and clippy
 make diagrams   # regenerate SVG/PNG; requires Python 3 and Graphviz
 ```
@@ -95,6 +101,7 @@ make diagrams   # regenerate SVG/PNG; requires Python 3 and Graphviz
 
 - [Architecture](docs/architecture.md) — request lifecycle, execution modes and code map
 - [State and scheduling](docs/state-and-scheduling.md) — memory/Redis, QoS, plugins and weights
+- [Admin console and API](docs/admin.md) — inventory, instance isolation, security and browser tests
 - [mwip](docs/mwip.md) · [Multimodal contract](docs/multimodal.md) · [Wire protocols](docs/protocol.md) · [Observability](docs/observability.md)
 - [Tokenizer/model configuration](configs/tokenizer.example.toml) · [Local stack](deploy/compose/README.md)
 

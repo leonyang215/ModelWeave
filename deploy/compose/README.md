@@ -28,6 +28,14 @@ make down     # stop and remove it
 The host ports move with the variables, e.g. `MW_GATEWAY_PORT=48080 make up`.
 The control-plane token is `local-control-token` (`MW_CONTROL_TOKEN`).
 
+The gateway embeds the **[admin console](../../docs/admin.md)** at
+http://localhost:38080/admin/ (or `MW_GATEWAY_PORT`). Enter the control-plane
+token to inspect models/instances/queues/tenant quotas, drain/resume, or
+block/unblock an instance ID. No extra frontend service is needed. This local
+stack uses memory backends: changes affect each gateway separately and disappear
+when it restarts. Use Redis for shared/persistent isolation, and a distinct
+`server.admin_token` plus HTTPS/network restrictions outside a local demo.
+
 ## Models
 
 | Model (gateway :38080) | Tokenizer model | Instances by role | Demonstrates |

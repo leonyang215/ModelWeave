@@ -11,10 +11,11 @@ import (
 // memoryStore keeps the records in the gateway process: the store of a
 // single gateway.
 type memoryStore struct {
-	mu    sync.RWMutex
-	recs  map[string]*memRecord
-	ver   uint64 // membership version
-	epoch int64
+	mu     sync.RWMutex
+	recs   map[string]*memRecord
+	blocks map[string]Block
+	ver    uint64 // membership version
+	epoch  int64
 }
 
 type memRecord struct {
@@ -25,7 +26,7 @@ type memRecord struct {
 
 // NewMemoryStore returns a store that keeps everything in this process.
 func NewMemoryStore() Store {
-	return &memoryStore{recs: make(map[string]*memRecord)}
+	return &memoryStore{recs: make(map[string]*memRecord), blocks: make(map[string]Block)}
 }
 
 func (s *memoryStore) Kind() string { return "memory" }
@@ -152,6 +153,9 @@ func (s *memoryStore) Load(_ context.Context, refs []Ref, now time.Time) ([]Reco
 		}
 		out[i] = r.rec
 		out[i].Entry, out[i].Now = r.e, now
+		if b, ok := s.blocks[ref.ID]; ok {
+			out[i].Block = &b
+		}
 	}
 	return out, nil
 }
@@ -192,6 +196,52 @@ func (s *memoryStore) SetDrain(_ context.Context, ref Ref, kind DrainKind, on bo
 	return nil
 }
 
+func (s *memoryStore) Block(ctx context.Context, id, reason string, now time.Time) (Block, error) {
+	if err := ctx.Err(); err != nil {
+		return Block{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if b, ok := s.blocks[id]; ok && b.Reason == reason {
+		return b, nil
+	}
+	b := Block{ID: id, Reason: reason, BlockedAtMS: now.UnixMilli()}
+	s.blocks[id] = b
+	if r := s.recs[id]; r != nil {
+		r.rec.Revision++
+	}
+	return b, nil
+}
+
+func (s *memoryStore) Unblock(ctx context.Context, id string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.blocks[id]; ok {
+		delete(s.blocks, id)
+		if r := s.recs[id]; r != nil {
+			r.rec.Revision++
+		}
+	}
+	return nil
+}
+
+func (s *memoryStore) Blocks(ctx context.Context) ([]Block, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]Block, 0, len(s.blocks))
+	for _, b := range s.blocks {
+		out = append(out, b)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out, nil
+}
+
 func (s *memoryStore) Reserve(_ context.Context, ref Ref, c Claim, lim Limits) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -201,6 +251,9 @@ func (s *memoryStore) Reserve(_ context.Context, ref Ref, c Claim, lim Limits) e
 	}
 	if _, exists := r.claims[c.ID]; exists {
 		return nil
+	}
+	if _, blocked := s.blocks[ref.ID]; blocked {
+		return ErrConflict
 	}
 	rec := &r.rec
 	if lim.Revision >= 0 && rec.Revision != lim.Revision {

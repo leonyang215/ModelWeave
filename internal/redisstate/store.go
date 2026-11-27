@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -110,7 +111,7 @@ func (s *Store) CheckSettings(ctx context.Context, heartbeatTTL time.Duration, b
 		Schema       int   `json:"schema"`
 		HeartbeatTTL int64 `json:"heartbeat_ttl_ms"`
 		BlockSize    int   `json:"block_size"`
-	}{2, heartbeatTTL.Milliseconds(), blockSize})
+	}{3, heartbeatTTL.Milliseconds(), blockSize})
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 	if err := s.Client.SetNX(ctx, s.Key("settings"), string(b), 0).Err(); err != nil {
@@ -274,6 +275,7 @@ type wireRecord struct {
 	UnhealthyTill int64                 `json:"unhealthy_till"`
 	AdminDrain    bool                  `json:"admin_drain"`
 	EngineDrain   bool                  `json:"engine_drain"`
+	Block         *registry.Block       `json:"block"`
 }
 
 func (s *Store) Load(ctx context.Context, refs []registry.Ref, _ time.Time) ([]registry.Record, error) {
@@ -307,7 +309,7 @@ func (s *Store) Load(ctx context.Context, refs []registry.Ref, _ time.Time) ([]r
 		if err != nil {
 			return nil, unavailable("load", err)
 		}
-		r := registry.Record{Gone: w.Gone, Entry: w.Entry, Now: time.UnixMilli(w.Now), LastSeen: time.UnixMilli(w.LastSeen), StateAt: time.UnixMilli(w.StateAt), StateVer: w.StateVer, Revision: w.Revision, PendingKV: w.PendingKV, Inflight: w.Inflight, ReservedKV: w.ReservedKV, Prefill: w.Prefill, Failures: w.Failures, AdminDrain: w.AdminDrain, EngineDrain: w.EngineDrain, UnhealthyTill: time.UnixMilli(w.UnhealthyTill)}
+		r := registry.Record{Gone: w.Gone, Entry: w.Entry, Now: time.UnixMilli(w.Now), LastSeen: time.UnixMilli(w.LastSeen), StateAt: time.UnixMilli(w.StateAt), StateVer: w.StateVer, Revision: w.Revision, PendingKV: w.PendingKV, Inflight: w.Inflight, ReservedKV: w.ReservedKV, Prefill: w.Prefill, Failures: w.Failures, AdminDrain: w.AdminDrain, EngineDrain: w.EngineDrain, Block: w.Block, UnhealthyTill: time.UnixMilli(w.UnhealthyTill)}
 		if w.State != nil {
 			r.HasState, r.State = true, *w.State
 		}
@@ -329,6 +331,43 @@ func (s *Store) SetState(ctx context.Context, ref registry.Ref, st registry.Engi
 }
 func (s *Store) SetDrain(ctx context.Context, ref registry.Ref, kind registry.DrainKind, on bool) error {
 	return s.integer(ctx, "drain", ref.ID, ref.Epoch, int(kind), boolInt(on))
+}
+
+func (s *Store) Block(ctx context.Context, id, reason string, _ time.Time) (registry.Block, error) {
+	ctx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+	raw, err := s.command(ctx, "block", id, reason).Text()
+	var b registry.Block
+	if err == nil {
+		err = json.Unmarshal([]byte(raw), &b)
+	}
+	if err != nil {
+		return b, unavailable("block", err)
+	}
+	return b, nil
+}
+
+func (s *Store) Unblock(ctx context.Context, id string) error {
+	return s.integer(ctx, "unblock", id)
+}
+
+func (s *Store) Blocks(ctx context.Context) ([]registry.Block, error) {
+	ctx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+	raws, err := s.command(ctx, "blocks", "").StringSlice()
+	if err != nil {
+		return nil, unavailable("blocks", err)
+	}
+	out := make([]registry.Block, 0, len(raws))
+	for _, raw := range raws {
+		var b registry.Block
+		if err := json.Unmarshal([]byte(raw), &b); err != nil {
+			return nil, unavailable("blocks", err)
+		}
+		out = append(out, b)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out, nil
 }
 func (s *Store) Reserve(ctx context.Context, ref registry.Ref, c registry.Claim, l registry.Limits) error {
 	if s.lost.Load() {

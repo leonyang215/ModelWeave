@@ -30,6 +30,7 @@ state:
 |---|---|---|
 | Instance membership/spec, model/role pools | local | shared, versioned membership |
 | Heartbeat liveness, engine reports, operator/engine drain | local | shared; atomic heartbeat update |
+| Operator instance-ID blacklist (including offline instances) | process-local; survives re-registration, not gateway restart | shared; survives re-registration and gateway restarts, subject to Redis persistence |
 | Passive-health failure count and cooldown | local | shared |
 | In-flight requests, KV/prefill reservations | local atomic check+reserve | global atomic conditional check+reserve |
 | Approximate prefix observations and engine KV events | local | shared; TTL, bounded approximate index |
@@ -56,6 +57,10 @@ must be reachable from every engine that reuses them.
   across them. A new registration epoch is allocated after removal/expiry or
   a model/role/target change. Late polls and releases cannot affect a newer
   epoch; prefix entries and sessions are epoch-scoped as well.
+- [Admin blacklist rules](admin.md) are independent of the registration epoch:
+  removal, heartbeat expiry, a changed model/role/target and re-registration do
+  not clear a blocked ID. Both scheduling snapshots and the atomic reservation
+  reject it. Unblocking does not override drains or passive-health cooldowns.
 - Selection uses shared load snapshots. The final reservation verifies the
   registration, state/drain/health revision and capacity bounds **atomically
   in Redis**, retrying on contention. There is no process-local lock acting
@@ -120,7 +125,7 @@ no Redis mode with an unnoticed local limiter/queue.
 ```yaml
 state:
   backend: redis                  # memory: the same semantics in one process
-  redis: {url: "${MW_REDIS_URL}", namespace: fleet-v2}
+  redis: {url: "${MW_REDIS_URL}", namespace: fleet-v3}
 tenants:
   - name: team-a
     api_keys: [sk-team-a]
@@ -187,9 +192,12 @@ tenant balances/concurrency and global per-model queue lengths; shared
 queue-depth gauges must not be summed across replicas. Request outcomes,
 rejections and latency counters remain local so they **can** be summed.
 
-The storage schema is now **2**. A mixed rollout with schema-1 gateways
-(which used local QoS) is rejected. Use a fresh namespace for the coordinated
-rollout; all gateways in a live namespace must agree on tenant policies and
+The storage schema is now **3** (schema 2 introduced shared QoS; schema 3 adds
+instance-ID blacklisting). A mixed rollout with older gateways is rejected:
+they cannot enforce the blacklist. Stop the old fleet and use a fresh namespace
+for the coordinated rollout; never send traffic to old and new fleets as if
+they shared isolation rules. Engines must heartbeat again to populate the new
+namespace; existing rules/state are not copied automatically. All gateways in a live namespace must agree on tenant policies and
 per-model queue settings. API keys can rotate without changing tenant names
 or resetting their quotas. Redis ACLs must permit the namespace's data/script
 operations and the QoS wake channel's `PUBLISH`/`SUBSCRIBE` operations.
